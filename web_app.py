@@ -180,6 +180,16 @@ class TrackingSession:
 
         # (t_ms, x, y, confidence) in display pixels
         self.samples: List[Tuple[float, float, float, float]] = []
+        # eye-to-camera distance: live smoothed value plus min/max history;
+        # the first value (or the distance at calibration time) becomes the
+        # mapper's reference and drift past config.distance_drift_warn_pct
+        # triggers a recalibration warning in the UI and report
+        self.distance_cm: Optional[float] = None
+        self.distance_sum = 0.0
+        self.distance_count = 0
+        self.distance_min_cm: Optional[float] = None
+        self.distance_max_cm: Optional[float] = None
+        self.distance_warning = False
         # grid mapping: digit id -> [(features, confidence)] and id -> target
         self.grid_samples: Dict[int, List[Tuple[np.ndarray, float]]] = {}
         self.grid_targets: Dict[int, Tuple[float, float]] = {}
@@ -223,12 +233,49 @@ class TrackingSession:
             return None
         return {"x": float(target[0]), "y": float(target[1])}
 
+    @property
+    def reference_distance_cm(self) -> Optional[float]:
+        return self.mapper.reference_distance_cm
+
+    def note_distance(self, distance_cm: Optional[float]) -> None:
+        """Update distance history and flag drift from the reference distance."""
+        if distance_cm is None or not math.isfinite(float(distance_cm)):
+            return
+        value = float(distance_cm)
+        self.distance_cm = value
+        self.distance_sum += value
+        self.distance_count += 1
+        self.distance_min_cm = value if self.distance_min_cm is None else min(self.distance_min_cm, value)
+        self.distance_max_cm = value if self.distance_max_cm is None else max(self.distance_max_cm, value)
+        if self.mapper.reference_distance_cm is None:
+            # first observation (uncalibrated) becomes the reference
+            self.mapper.set_reference_distance(value)
+        reference = self.mapper.reference_distance_cm
+        if reference:
+            drift = 100.0 * abs(value - reference) / reference
+            self.distance_warning = drift > self.config.distance_drift_warn_pct
+
+    @property
+    def distance_drift_pct(self) -> Optional[float]:
+        reference = self.mapper.reference_distance_cm
+        if reference is None or self.distance_cm is None:
+            return None
+        return 100.0 * abs(self.distance_cm - reference) / reference
+
+    @property
+    def mean_distance_cm(self) -> Optional[float]:
+        if self.distance_count == 0:
+            return None
+        return self.distance_sum / self.distance_count
+
 
 def complete_calibration(session: TrackingSession) -> None:
     """Fit the mapping model on collected samples and measure in-sample error."""
     assert session.calibrator is not None
     samples = session.calibrator.finalize()
-    if not session.mapper.fit(samples):
+    # lock the mapper's distance reference to where the user sat while
+    # calibrating; later leaning shows up as drift + gaze compensation
+    if not session.mapper.fit(samples, reference_distance_cm=session.distance_cm):
         session.calibration_error = (
             "fit failed: not enough feature spread - sit closer, improve lighting, "
             "or redo calibration"
@@ -276,6 +323,7 @@ def handle_frame(
     result = tracker.process(frame)
     session.frames += 1
     session.inference_ms.append(result.inference_ms)
+    session.note_distance(result.distance_cm)
 
     face_found = result.features is not None or bool(result.eyes)
     if face_found:
@@ -287,7 +335,15 @@ def handle_frame(
         "confidence": float(result.confidence),
         "inference_ms": float(result.inference_ms),
         "frame": session.frames,
+        "distance_warning": bool(session.distance_warning),
     }
+    if result.distance_cm is not None:
+        response["distance_cm"] = round(float(result.distance_cm), 1)
+    if session.reference_distance_cm is not None:
+        response["distance_reference_cm"] = round(float(session.reference_distance_cm), 1)
+    drift = session.distance_drift_pct
+    if drift is not None:
+        response["distance_drift_pct"] = round(drift, 1)
     if result.confidences is not None:
         response["confidence_breakdown"] = result.confidences.as_dict()
     if result.head_pose is not None:
@@ -303,7 +359,10 @@ def handle_frame(
             response["mode"] = session.mode
             response["calibration"] = session.calibration_summary
     elif session.mode == "tracking":
-        position = session.mapper.map(result.gaze, result.features, result.confidence)
+        position = session.mapper.map(
+            result.gaze, result.features, result.confidence,
+            distance_cm=result.distance_cm,
+        )
         if position is not None:
             x, y = position
             scale_x = session.doc_width / max(session.rect["w"], 1e-6)
@@ -410,6 +469,25 @@ def build_report(
         else 0.0,
         "calibration": session.calib_residual,
         "grid": session.grid_stats,
+        "distance": {
+            "reference_cm": round(float(session.reference_distance_cm), 1)
+            if session.reference_distance_cm is not None
+            else None,
+            "mean_cm": round(float(session.mean_distance_cm), 1)
+            if session.mean_distance_cm is not None
+            else None,
+            "min_cm": round(float(session.distance_min_cm), 1)
+            if session.distance_min_cm is not None
+            else None,
+            "max_cm": round(float(session.distance_max_cm), 1)
+            if session.distance_max_cm is not None
+            else None,
+            "drift_pct": round(float(session.distance_drift_pct), 1)
+            if session.distance_drift_pct is not None
+            else None,
+            "drift_warning": bool(session.distance_warning),
+            "warn_threshold_pct": session.config.distance_drift_warn_pct,
+        },
         "mapping": {
             "model": session.mapper.mapping_name,
             "valid_sample_rate": round(session.mapper.valid_sample_rate, 3),
@@ -471,8 +549,17 @@ def create_session() -> Response:
     except (KeyError, TypeError, ValueError) as exc:
         return jsonify({"error": f"invalid session payload: {exc}"}), 400
 
-    config = GazeConfig(calibration_points=points, mapping_model=model)
-    config.validate()
+    try:
+        config = GazeConfig(
+            calibration_points=points,
+            mapping_model=model,
+            # adaptive smoothing by default: strong while the gaze is still,
+            # light while it moves (the fixed EMA lags or jitters at one end)
+            smoothing_filter=str(payload.get("smoothing", "oneeuro")),
+        )
+        config.validate()
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": f"invalid session payload: {exc}"}), 400
 
     with STATE_LOCK:
         if _session is not None:

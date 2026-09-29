@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 import web_app
-from gaze_core import FEATURE_DIM, AttentionHeatmap
+from gaze_core import FEATURE_DIM, AttentionHeatmap, ConfidenceBreakdown, GazeResult
 
 
 def png_data_url(image: np.ndarray) -> str:
@@ -148,6 +148,10 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(frame["mode"], "calibrating")
         self.assertIn("status", frame["calibration"])
         self.assertIn("target", frame["calibration"])
+        # no face -> no eye-distance reading, and never a false drift warning
+        self.assertNotIn("distance_cm", frame)
+        self.assertNotIn("distance_reference_cm", frame)
+        self.assertFalse(frame["distance_warning"])
 
         # finish is refused while calibration is still running
         res = self.client.post("/api/finish", json={})
@@ -186,7 +190,7 @@ class WebAppTest(unittest.TestCase):
         for key in (
             "duration_s", "frames", "face_rate", "mean_confidence", "gaze_samples",
             "heatmap_points", "fixations", "saccades", "calibration", "mapping",
-            "heatmap",
+            "heatmap", "distance",
         ):
             self.assertIn(key, stats)
         self.assertEqual(stats["gaze_samples"], 48)
@@ -221,6 +225,132 @@ class WebAppTest(unittest.TestCase):
         res = self.client.post("/api/reset", json={})
         self.assertEqual(res.status_code, 200)
         self.assertIsNone(self.client.get("/api/health").get_json()["session"])
+
+
+class DistanceTrackingTest(unittest.TestCase):
+    """Eye-to-camera distance: frame fields, drift warning, report statistics.
+
+    Uses a fake tracker so a "face" with a controllable distance can be fed
+    through the real HTTP + session path without a webcam.
+    """
+
+    class FakeTracker:
+        def __init__(self, distance_cm=55.0):
+            self.distance_cm = distance_cm
+            self.rng = np.random.default_rng(5)
+
+        def process(self, frame):
+            features = synthetic_features(self.rng, (0.5, 0.5))
+            return GazeResult(
+                (0.6, 0.5), 0.9, [], 1.0, features, None,
+                ConfidenceBreakdown(pupil=0.9, landmark=0.9, head_pose=0.9,
+                                    gaze=0.9, temporal=0.9),
+                distance_cm=self.distance_cm,
+            )
+
+    def setUp(self):
+        web_app.app.config["TESTING"] = True
+        self.client = web_app.app.test_client()
+        self._clear_session()
+        self._real_tracker = None
+
+    def tearDown(self):
+        self._clear_session()
+        if self._real_tracker is not None:      # restore whatever ran before the fake
+            web_app._tracker = self._real_tracker
+
+    @staticmethod
+    def _clear_session():
+        with web_app.STATE_LOCK:
+            if web_app._session is not None:
+                web_app._session.dispose()
+                web_app._session = None
+
+    def _use_fake_tracker(self, distance_cm):
+        """Swap in a fake tracker, remembering the real one for tearDown."""
+        self._real_tracker = web_app._tracker
+        fake = self.FakeTracker(distance_cm=distance_cm)
+        web_app._tracker = fake
+        return fake
+
+    def _start(self, calibration=False):
+        res = self.client.post(
+            "/api/session", json=WebAppTest._session_payload(calibration=calibration)
+        )
+        self.assertEqual(res.status_code, 200)
+
+    def _post_frame(self, t_ms):
+        res = self.client.post(
+            "/api/frame", json={"image": png_data_url(blank_frame()), "t_ms": t_ms}
+        )
+        self.assertEqual(res.status_code, 200)
+        return res.get_json()
+
+    def test_frame_reports_distance_reference_and_drift_warning(self):
+        self._start(calibration=False)
+        fake = self._use_fake_tracker(55.0)
+
+        first = self._post_frame(100.0)
+        self.assertEqual(first["distance_cm"], 55.0)
+        self.assertEqual(first["distance_reference_cm"], 55.0)   # first reading is the reference
+        self.assertEqual(first["distance_drift_pct"], 0.0)
+        self.assertFalse(first["distance_warning"])
+
+        fake.distance_cm = 70.0    # leaned back 15 cm -> 27% drift, past the 15% threshold
+        second = self._post_frame(200.0)
+        self.assertEqual(second["distance_cm"], 70.0)
+        self.assertAlmostEqual(second["distance_drift_pct"], 27.3, delta=0.1)
+        self.assertTrue(second["distance_warning"])
+
+        fake.distance_cm = 57.0    # close to the reference again -> warning clears
+        third = self._post_frame(300.0)
+        self.assertAlmostEqual(third["distance_drift_pct"], 3.6, delta=0.1)
+        self.assertFalse(third["distance_warning"])
+
+    def test_report_contains_distance_statistics(self):
+        self._start(calibration=False)
+        fake = self._use_fake_tracker(55.0)
+        self._post_frame(100.0)
+        self._post_frame(200.0)
+        fake.distance_cm = 70.0
+        self._post_frame(300.0)
+
+        res = self.client.post("/api/finish", json={"decay": False})
+        self.assertEqual(res.status_code, 200)
+        distance = res.get_json()["stats"]["distance"]
+        self.assertEqual(distance["reference_cm"], 55.0)
+        self.assertEqual(distance["min_cm"], 55.0)
+        self.assertEqual(distance["max_cm"], 70.0)
+        self.assertAlmostEqual(distance["mean_cm"], 60.0, delta=0.1)   # (55+55+70)/3
+        self.assertAlmostEqual(distance["drift_pct"], 27.3, delta=0.1)
+        self.assertTrue(distance["drift_warning"])
+        self.assertEqual(distance["warn_threshold_pct"], 15.0)
+
+    def test_calibration_locks_the_distance_reference(self):
+        self._start(calibration=True)
+        with web_app.STATE_LOCK:
+            session = web_app._session
+            session.note_distance(62.0)
+            drive_calibration(session, np.random.default_rng(3))
+            web_app.complete_calibration(session)
+            self.assertEqual(session.mapper.reference_distance_cm, 62.0)
+            self.assertEqual(session.distance_cm, 62.0)
+
+    def test_session_smoothing_selection(self):
+        payload = WebAppTest._session_payload()
+        res = self.client.post("/api/session", json=payload)
+        self.assertEqual(res.status_code, 200)
+        with web_app.STATE_LOCK:
+            self.assertEqual(web_app._session.config.smoothing_filter, "oneeuro")
+
+        payload["smoothing"] = "ema"
+        res = self.client.post("/api/session", json=payload)
+        self.assertEqual(res.status_code, 200)
+        with web_app.STATE_LOCK:
+            self.assertEqual(web_app._session.config.smoothing_filter, "ema")
+
+        payload["smoothing"] = "median"
+        self.assertEqual(self.client.post("/api/session", json=payload).status_code, 400)
 
 
 class GridMappingTest(unittest.TestCase):

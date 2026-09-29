@@ -212,6 +212,7 @@
       <div class="row kv"><span>gaze fps</span><span id="fpsVal">–</span></div>
       <div class="row kv"><span>inference</span><span id="inferVal">–</span></div>
       <div class="row kv"><span>face</span><span id="faceVal">–</span></div>
+      <div class="row kv"><span>eye distance</span><span id="distVal">–</span></div>
       <div class="row kv"><span>calibration residual</span><span id="residVal">–</span></div>
     </div>
 
@@ -258,7 +259,7 @@ const els = {
   decayChk: $("decayChk"), livePanel: $("livePanel"), cam: $("cam"),
   confBar: $("confBar"), confVal: $("confVal"), calibBar: $("calibBar"),
   calibVal: $("calibVal"), fpsVal: $("fpsVal"), inferVal: $("inferVal"),
-  faceVal: $("faceVal"), residVal: $("residVal"),
+  faceVal: $("faceVal"), residVal: $("residVal"), distVal: $("distVal"),
   gridPanel: $("gridPanel"), gridBtn: $("gridBtn"), gridStatus: $("gridStatus"),
   actionsPanel: $("actionsPanel"),
   startBtn: $("startBtn"), finishBtn: $("finishBtn"), resetBtn: $("resetBtn"),
@@ -274,7 +275,8 @@ let state = "idle";          // idle | ready | starting | calibrating | tracking
 let hasDoc = false;
 let stream = null;
 let capture = null;          // offscreen canvas for webcam frames
-let loopTimer = null;
+let loopTimer = null;       // id of the next frame pump (setTimeout chain)
+let loopRunning = false;    // true while the frame loop should keep going
 let inFlight = false;
 let sessionRect = null;      // document display rect sent to the server
 let lastGaze = null;         // {x, y} in rect-relative CSS px
@@ -536,6 +538,7 @@ async function startSession() {
     const data = await post("/api/session", payload);
     lastGaze = null; trail = []; liveTarget = null; fpsTimes = [];
     els.residVal.textContent = "–";
+    els.distVal.textContent = "–"; els.distVal.style.color = "var(--dim)";
     const calibrating = data.mode === "calibrating";
     setState(calibrating ? "calibrating" : "tracking");
     startLoop();
@@ -552,13 +555,41 @@ async function startSession() {
 }
 
 // ---------------------------------------------------------------- frame loop
+// Adaptive setTimeout chain instead of a fixed interval: each frame is sent
+// as soon as the previous one finished plus a small floor, so the gaze dot
+// keeps up with the eye at whatever rate the server can actually process
+// (a fixed 80 ms interval capped it at ~12.5 fps and lagged behind saccades).
+const FRAME_FLOOR_MS = 16;
+
 function startLoop() {
-  if (loopTimer) return;
-  loopTimer = setInterval(tick, 80);   // ~12.5 frames/s keeps calibration moving
+  if (loopRunning) return;
+  loopRunning = true;
+  scheduleTick(0);
+}
+
+function scheduleTick(delay) {
+  clearTimeout(loopTimer);
+  loopTimer = setTimeout(runTick, delay);
+}
+
+async function runTick() {
+  loopTimer = null;
+  if (!loopRunning) return;
+  if (!stream || (state !== "calibrating" && state !== "tracking")) {
+    stopLoop();
+    return;
+  }
+  const started = performance.now();
+  await tick();                       // may call stopLoop() on an error
+  if (!loopRunning) return;
+  const elapsed = performance.now() - started;
+  scheduleTick(Math.max(FRAME_FLOOR_MS - elapsed, 0));
 }
 
 function stopLoop() {
-  if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
+  loopRunning = false;
+  clearTimeout(loopTimer);
+  loopTimer = null;
   inFlight = false;
 }
 
@@ -612,6 +643,18 @@ function handleFrame(data) {
   els.confBar.style.background = conf > 0.6 ? "var(--ok)" : conf > 0.35 ? "var(--warn)" : "#d23105";
   els.confVal.textContent = conf.toFixed(2);
   els.inferVal.textContent = (data.inference_ms || 0).toFixed(0) + " ms";
+
+  if (typeof data.distance_cm === "number") {
+    let text = data.distance_cm.toFixed(0) + " cm";
+    if (data.distance_warning && typeof data.distance_drift_pct === "number") {
+      text += " (" + data.distance_drift_pct.toFixed(0) + "% off)";
+    }
+    els.distVal.textContent = text;
+    els.distVal.style.color = data.distance_warning ? "var(--warn)" : "var(--text)";
+  } else {
+    els.distVal.textContent = data.face ? "\u2026" : "\u2013";
+    els.distVal.style.color = "var(--dim)";
+  }
 
   if (data.mode === "calibration_failed") {
     stopLoop();
@@ -850,7 +893,7 @@ async function finishSession() {
     toast("Heatmap report ready", true);
   } catch (err) {
     toast(err.message);
-    if (!loopTimer && stream) startLoop();   // keep tracking if the report failed
+    if (!loopRunning && stream) startLoop();   // keep tracking if the report failed
   }
 }
 
@@ -890,6 +933,19 @@ function fillStats(s) {
     rows.push(["Mapping error after grid",
       s.grid.post_error_px != null ? s.grid.post_error_px + " px" : "not fitted"]);
   }
+  if (s.distance) {
+    const d = s.distance;
+    rows.push(["Eye distance (reference)",
+      d.reference_cm != null
+        ? d.reference_cm + " cm" + (d.drift_warning ? " — drift warning" : "")
+        : "n/a"]);
+    rows.push(["Eye distance (mean/min/max)",
+      d.mean_cm != null ? d.mean_cm + " / " + d.min_cm + " / " + d.max_cm + " cm" : "n/a"]);
+    rows.push(["Eye distance drift",
+      d.drift_pct != null
+        ? d.drift_pct + " % (warn over " + d.warn_threshold_pct + " %)"
+        : "n/a"]);
+  }
   els.statsTable.innerHTML = rows
     .map((r) => "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>")
     .join("");
@@ -915,6 +971,7 @@ async function hardReset(backToIdle) {
   els.confVal.textContent = "–"; els.calibVal.textContent = "–";
   els.fpsVal.textContent = "–"; els.inferVal.textContent = "–";
   els.faceVal.textContent = "–"; els.residVal.textContent = "–";
+  els.distVal.textContent = "–"; els.distVal.style.color = "var(--dim)";
   if (busy) return;                     // a startSession is running — do not clobber its state
   setState(backToIdle || !hasDoc ? "idle" : "ready");
   if (hasDoc && !backToIdle) fitDoc();

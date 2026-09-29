@@ -131,9 +131,12 @@ def main() -> int:
                     f"gaze=({result.gaze[0]:.3f}, {result.gaze[1]:.3f}) "
                     f"conf={result.confidence:.2f}"
                 )
+            distance_text = ""
+            if result.distance_cm is not None:
+                distance_text = f"  dist={result.distance_cm:.0f}cm"
             header = (
                 f"fps={fps:4.1f}  track={result.inference_ms:5.1f}ms  "
-                f"pupil={tracker.pupil_mode}  {gaze_text}"
+                f"pupil={tracker.pupil_mode}  {gaze_text}{distance_text}"
             )
             cv2.putText(canvas, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
             if show_hud:

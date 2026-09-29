@@ -215,19 +215,19 @@
       <div class="card">
         <h4>Files &amp; responsibilities</h4>
         <ul>
-          <li><code>gaze_core.py</code> (2054 lines) — config, features, confidence, head pose,
-              fusion, calibration, mapping models, heatmap.</li>
-          <li><code>phase1_eye_tracking.py</code> (210) — live eye / head-pose feature view.</li>
-          <li><code>phase2_coordinate_mapping.py</code> (890) — calibration, mapping, validation,
+          <li><code>gaze_core.py</code> (2272 lines) — config, features, confidence, head pose,
+              fusion, eye-distance estimate, calibration, mapping models, heatmap.</li>
+          <li><code>phase1_eye_tracking.py</code> (213) — live eye / head-pose feature view.</li>
+          <li><code>phase2_coordinate_mapping.py</code> (948) — calibration, mapping, validation,
               evaluation reports.</li>
-          <li><code>phase3_attention_heatmap.py</code> (869) — fixation detection, accumulation,
+          <li><code>phase3_attention_heatmap.py</code> (877) — fixation detection, accumulation,
               decay, rendering, export.</li>
-          <li><code>web_app.py</code> (675) — Flask server: sessions, frame loop, calibration,
-              grid refit, heatmap report.</li>
-          <li><code>web_interface.html</code> (971) — browser UI: upload, webcam, calibration,
-              live gaze dot, grid overlay, report.</li>
-          <li><code>test_gaze_pipeline.py</code> (952) — 57 offline pipeline tests, no webcam.</li>
-          <li><code>test_webapp.py</code> (376) — 16 headless browser-interface tests, no webcam.</li>
+          <li><code>web_app.py</code> (762) — Flask server: sessions, frame loop, calibration,
+              grid refit, distance tracking, heatmap report.</li>
+          <li><code>web_interface.html</code> (1028) — browser UI: upload, webcam, calibration,
+              live gaze dot, distance readout, grid overlay, report.</li>
+          <li><code>test_gaze_pipeline.py</code> (1235) — 78 offline pipeline tests, no webcam.</li>
+          <li><code>test_webapp.py</code> (506) — 20 headless browser-interface tests, no webcam.</li>
         </ul>
       </div>
       <div class="card">
@@ -239,7 +239,7 @@
           <li><code>python phase2_coordinate_mapping.py --validate --compare-models</code></li>
           <li><code>python phase3_attention_heatmap.py --background camera</code></li>
           <li><code>python web_app.py</code> → <code>http://127.0.0.1:5000</code></li>
-          <li><code>python -m unittest discover -p "test_*.py"</code> (73 tests)</li>
+          <li><code>python -m unittest discover -p "test_*.py"</code> (98 tests)</li>
         </ul>
       </div>
       <div class="card">
@@ -249,6 +249,7 @@
           <li><code>gain 3.0</code>, <code>ema_alpha 0.3</code>, <code>warmup 45</code> frames</li>
           <li><code>cell 4 px</code>, <code>σ 45 px</code>, <code>τ 5 s</code>, <code>γ 0.75</code>, <code>α 0.7</code></li>
           <li><code>confidence_threshold 0.5</code>, heatmap gate <code>0.35</code></li>
+          <li><code>distance_drift_warn_pct 15</code>, reference width <code>9.5 cm</code></li>
         </ul>
       </div>
     </div>
@@ -271,9 +272,14 @@
               as an independent signal.</li>
           <li>Estimates head pose (yaw/pitch/roll) with <code>cv2.solvePnP</code> from 6 stable
               landmarks against a 3D head model (~60° FOV pinhole camera).</li>
+          <li>Measures the <b>eye-to-camera distance</b> from the inter-ocular pixel width
+              (<code>focal × 9.5 cm ÷ iod_px</code>), plausibility-gated to 20–300 cm and
+              EMA-smoothed across frames — printed as <code>dist=…cm</code> in the HUDs and
+              as a sidebar row with a drift warning in the browser demo.</li>
           <li>Fuses both eyes by <b>quality weight</b> — never a plain average.</li>
         </ul>
-        <p class="ref">gaze_core.py → EyeTracker, estimate_head_pose, build_feature_vector, fuse_eye_gazes</p>
+        <p class="ref">gaze_core.py → EyeTracker, estimate_head_pose, estimate_eye_distance_cm,
+          build_feature_vector, fuse_eye_gazes</p>
       </div>
       <div class="card">
         <h4>Pupil modes (<code>--pupil</code> / key <code>i</code>)</h4>
@@ -399,7 +405,8 @@
   <section id="phase2">
     <h2>3 · Phase 2 — Calibration &amp; gaze mapping <span class="tag">phase2_coordinate_mapping.py</span></h2>
     <p class="sub">Map the feature vector to absolute pixels on a virtual 1920×1080 screen, with
-    outlier rejection and configurable EMA smoothing — then measure the result in validation mode.</p>
+    outlier rejection and either fixed-factor EMA or adaptive 1 € smoothing — then measure
+    the result in validation mode.</p>
 
     <div class="grid">
       <div class="card">
@@ -410,10 +417,15 @@
           <li><b>Calibrated:</b> a mapping model is fitted on
               <code>Features → Known Screen Coordinate</code> samples and predicts from the full
               11-channel vector.</li>
-          <li>Both clamp to screen bounds, then apply
-              <code>new = α·x + (1−α)·old</code> with <code>ema_alpha</code> (default 0.3).</li>
+          <li>Both clamp to screen bounds, then smooth — EMA
+              (<code>new = α·x + (1−α)·old</code>, <code>ema_alpha</code> default 0.3) or the
+              adaptive <b>1 € filter</b> (<code>smoothing_filter="oneeuro"</code>: strong while the
+              gaze is still, almost none while it moves, so jitter and lag improve together).</li>
+          <li>With a distance reference (set at calibration), the offset from screen centre is
+              scaled by <code>distance_cm / reference_cm</code>, clamped to [0.7, 1.4] —
+              leaning toward/away from the camera is compensated instead of shifting the gaze.</li>
         </ul>
-        <p class="ref">gaze_core.py → ScreenMapper, build_mapping_model</p>
+        <p class="ref">gaze_core.py → ScreenMapper, OneEuroFilter, build_mapping_model</p>
       </div>
       <div class="card">
         <h4>Mapping models (<code>--mapping</code>)</h4>
@@ -682,10 +694,14 @@
               image. Uploads longer than 2400 px are downscaled; the request body is capped at 64 MB.</li>
           <li><b>Options</b> — calibration 5 points / 9 points / none (rough centre mapping),
               mapping model affine | polynomial | mlp, and the time-decay checkbox.</li>
-          <li><b>Track</b> — the client posts a frame every 80 ms (≈12.5 fps) while the sidebar
-              shows confidence, face rate, fps, inference time and the calibration residual.</li>
+          <li><b>Track</b> — the client posts a frame as soon as the previous one finishes plus a
+              16 ms floor (an adaptive <code>setTimeout</code> chain instead of a fixed 80 ms
+              interval, so the dot keeps up with the eye) while the sidebar shows confidence,
+              face rate, fps, inference time, the measured <b>eye distance</b> (with a
+              <code>% off</code> drift warning past 15 %) and the calibration residual.</li>
           <li><b>Finish</b> — <code>/api/finish</code> renders the report; <code>gaze_heatmap.png</code>
-              and <code>gaze_report.json</code> are downloadable.</li>
+              and <code>gaze_report.json</code> are downloadable, including eye-distance
+              reference / mean / min / max and drift statistics.</li>
         </ul>
         <p class="ref">TrackingSession · handle_frame() · build_report()</p>
       </div>
@@ -910,8 +926,9 @@
       <li><b>Per-record error</b> —
           <code>error_px = √((predicted_x − target_x)² + (predicted_y − target_y)²)</code>.</li>
       <li><b>Aggregate</b> — mean, median, standard deviation, 95th percentile and maximum, overall,
-          <b>per target</b>, and <b>per head-pose condition</b> (neutral ≤ 8°, slight ≤ 20°,
-          moderate above).</li>
+          <b>per target</b>, <b>per head-pose condition</b> (neutral ≤ 8°, slight ≤ 20°,
+          moderate above) and <b>per eye-distance condition</b> (near &lt; 45 cm, typical,
+          far &gt; 70 cm).</li>
       <li><b>Export</b> — <code>evaluation_report.json</code> + <code>.csv</code>, plus
           <code>evaluation_report_pairs.npz</code> (raw targets/predictions) for offline analysis.</li>
     </ol>
@@ -941,6 +958,14 @@
         effect of head-pose compensation can be <b>measured rather than assumed</b>. Report these
         buckets before and after enabling head-pose features to quantify any benefit.</p>
       </div>
+      <div class="card">
+        <h4>Eye-distance conditions</h4>
+        <p>Every record also carries the measured eye-to-camera distance, bucketed
+        (near &lt; 45 cm / typical / far &gt; 70 cm) into <code>error_by_distance_px</code> with
+        mean/min/max distance alongside. Leaning toward or away from the camera changes the
+        projected gaze angle — this bucket shows whether distance compensation helps on your
+        setup instead of assuming it does.</p>
+      </div>
     </div>
   </section>
 
@@ -963,6 +988,8 @@
       <tr><td><code>recorded_samples</code></td><td>Predictions actually recorded behind the statistics</td></tr>
       <tr><td><code>per_target_error_px</code></td><td>Error statistics broken down per calibration target</td></tr>
       <tr><td><code>error_by_head_pose_px</code></td><td>Error statistics per head-pose condition</td></tr>
+      <tr><td><code>error_by_distance_px</code></td><td>Error statistics per eye-distance condition (near / typical / far)</td></tr>
+      <tr><td><code>eye_distance_cm</code></td><td>Mean / min / max measured eye-to-camera distance of the recorded samples</td></tr>
       <tr><td><code>angular_error_degrees</code></td><td>Only present when display/camera geometry was supplied</td></tr>
       <tr><td><code>model_comparison</code></td><td>Side-by-side error statistics for affine / polynomial / MLP</td></tr>
       <tr><td><code>config</code></td><td>The configuration used, so the run can be reproduced</td></tr>
@@ -990,7 +1017,10 @@
       <tr><td><code>calibration_stabilize_frames</code></td><td>12</td><td>Dwell before sampling</td></tr>
       <tr><td><code>calibration_min_confidence</code> / <code>calibration_outlier_z</code></td><td>0.35 / 3.0</td><td>Confidence gate / MAD outlier z-score</td></tr>
       <tr><td><code>min_calibration_span</code></td><td>0.25</td><td>Minimum feature spread required for a fit</td></tr>
-      <tr><td rowspan="3">Smoothing &amp; outliers</td><td><code>ema_alpha</code></td><td>0.3</td><td>EMA factor (1 = off)</td></tr>
+      <tr><td rowspan="6">Smoothing &amp; outliers</td><td><code>ema_alpha</code></td><td>0.3</td><td>EMA factor (1 = off)</td></tr>
+      <tr><td><code>smoothing_filter</code></td><td>ema</td><td>ema | oneeuro (adaptive: strong when still, light when moving)</td></tr>
+      <tr><td><code>oneeuro_min_cutoff</code> / <code>oneeuro_beta</code> / <code>oneeuro_d_cutoff</code></td><td>1.0 / 0.01 / 1.0</td><td>1 € filter: base Hz · speed weight · derivative Hz</td></tr>
+      <tr><td><code>distance_drift_warn_pct</code></td><td>15.0</td><td>Eye-distance drift from the calibration reference before a warning</td></tr>
       <tr><td><code>confidence_threshold</code></td><td>0.5</td><td>Sample rejection gate</td></tr>
       <tr><td><code>outlier_max_jump_px</code> / <code>outlier_max_speed_px_s</code></td><td>0.0 (auto) / 0.0</td><td>1.5 × diagonal by default / speed limit disabled</td></tr>
       <tr><td rowspan="2">Eye fusion</td><td><code>min_total_eye_quality</code></td><td>0.12</td><td>Fusion rejection floor</td></tr>
@@ -1039,9 +1069,16 @@
       produces an inaccurate mapping regardless of the model chosen.</p></div>
       <div class="card"><h4>Individual variation</h4><p>All thresholds (dispersion, confidence gates,
       quality weights) are heuristics tuned on generic data and may need re-tuning per person.</p></div>
-      <div class="card"><h4>Browser frame rate</h4><p>The web demo posts ≈12.5 fps JPEG frames, so
-      fixation granularity, temporal confidence and saccade peak velocities are coarser than in the
-      native loops; upload scaling also resizes the heatmap grid.</p></div>
+      <div class="card"><h4>Browser frame rate</h4><p>The web demo posts a frame as soon as the
+      previous one is processed plus a 16 ms floor, so its rate is whatever the server sustains —
+      slower than the native loops when MediaPipe is busy; fixation granularity, temporal
+      confidence and saccade peak velocities scale with it. Upload scaling also resizes the
+      heatmap grid.</p></div>
+      <div class="card"><h4>Distance estimate</h4><p>The eye-to-camera distance assumes the
+      average adult canthal width (9.5 cm) and the same ~60° FOV pinhole model, so the
+      <b>absolute</b> centimetre figure is only accurate to roughly ±10 % — frame-to-frame
+      changes are the trustworthy part, and gaze compensation is clamped to [0.7, 1.4]× so a
+      bad reading cannot wreck the mapping.</p></div>
     </div>
   </section>
 
@@ -1137,13 +1174,16 @@ move the mouse over the canvas →</div>
       <div class="card">
         <h4>What has been verified here</h4>
         <ul>
-          <li>73 offline tests pass — 57 pipeline tests (head pose recovery, fusion, calibration,
-              all three mapping models, fixation detection, time-based decay, σ unit conversion,
-              the accumulation-matrix view's stable scale and screen axes,
-              reports, and a synthetic end-to-end Phase 1 run) plus 16 browser-interface tests
-              (session/frame/finish/reset contracts, the real MediaPipe frame path on face-less
-              frames, calibration fit + residual, grid refit with measured pre/post error, and the
-              report render with its blue→red colormap endpoints).</li>
+          <li>98 offline tests pass — 78 pipeline tests (head pose recovery, fusion, calibration,
+              all three mapping models, eye-distance estimation and its EMA/one-euro behaviour,
+              distance compensation and clamping, the 1 € filter, fixation detection,
+              time-based decay, σ unit conversion, the accumulation-matrix view's stable scale
+              and screen axes, per-distance validation buckets, reports, and a synthetic
+              end-to-end Phase 1 run including distance scaling when the face moves back) plus
+              20 browser-interface tests (session/frame/finish/reset contracts, distance frame
+              fields and drift warning, report distance statistics, the real MediaPipe frame
+              path on face-less frames, calibration fit + residual, grid refit with measured
+              pre/post error, and the report render with its blue→red colormap endpoints).</li>
           <li>All three CLIs start and parse arguments; <code>web_app.py</code> serves
               <code>/</code>, <code>/api/health</code> and the expected 4xx codes;
               <code>pyflakes</code> is clean on every Python file.</li>

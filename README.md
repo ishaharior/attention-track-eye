@@ -38,7 +38,7 @@ Pupil position alone is never treated as the direct gaze direction.
                Screen X/Y  ── outlier rejection
                      │
                      ▼
-            Temporal Filtering (configurable EMA)
+             Temporal Filtering (EMA or adaptive 1€ filter)
                      │
                      ▼
            Confidence Estimation (5 separate components)
@@ -65,15 +65,15 @@ Pupil position alone is never treated as the direct gaze direction.
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `gaze_core.py` | 2054 | Shared core: `GazeConfig`, feature definitions, confidence model, head pose, eye fusion, calibration, mapping models, heatmap |
-| `phase1_eye_tracking.py` | 210 | Phase 1 — eye ROI, pupil/iris detection, head pose, feature vector, eye fusion (live webcam UI) |
-| `phase2_coordinate_mapping.py` | 890 | Phase 2 — calibration, mapping models, outlier rejection, EMA, validation mode, evaluation reports |
-| `phase3_attention_heatmap.py` | 869 | Phase 3 — fixation/saccade detection, weighted accumulation, time decay, blur, rendering, export |
-| `test_gaze_pipeline.py` | 952 | Offline pipeline test suite (57 tests, no webcam required) |
-| `test_webapp.py` | 376 | Headless browser-interface test suite (16 tests, no webcam required) |
-| `web_app.py` | 675 | Flask server: live browser sessions, calibration, frame loop, heatmap report |
-| `web_interface.html` | 971 | Browser UI: document upload, webcam capture, calibration, live gaze dot, report |
-| `process_explainer.html` | 1341 | Browser documentation + interactive conceptual simulation |
+| `gaze_core.py` | 2272 | Shared core: `GazeConfig`, feature definitions, confidence model, head pose, eye fusion, eye-distance estimate, calibration, mapping models, heatmap |
+| `phase1_eye_tracking.py` | 213 | Phase 1 — eye ROI, pupil/iris detection, head pose, feature vector, eye fusion (live webcam UI) |
+| `phase2_coordinate_mapping.py` | 948 | Phase 2 — calibration, mapping models, outlier rejection, smoothing, validation mode, evaluation reports |
+| `phase3_attention_heatmap.py` | 877 | Phase 3 — fixation/saccade detection, weighted accumulation, time decay, blur, rendering, export |
+| `test_gaze_pipeline.py` | 1235 | Offline pipeline test suite (78 tests, no webcam required) |
+| `test_webapp.py` | 506 | Headless browser-interface test suite (20 tests, no webcam required) |
+| `web_app.py` | 762 | Flask server: live browser sessions, calibration, frame loop, distance tracking, heatmap report |
+| `web_interface.html` | 1028 | Browser UI: document upload, webcam capture, calibration, live gaze dot, distance/warning, report |
+| `process_explainer.html` | 1381 | Browser documentation + interactive conceptual simulation |
 
 Three-phase organization is preserved: **Phase 1** eye/head-pose feature extraction,
 **Phase 2** coordinate mapping, **Phase 3** gaze-density heatmap.
@@ -108,6 +108,21 @@ camera-relative face orientation are compensated for in the mapping stage.
 Head-pose compensation **reduces** the error caused by head movement; it does not
 eliminate it, and the effect is meant to be measured (see
 [Validation methodology](#7-validation-methodology)), not assumed.
+
+### Eye-to-camera distance
+
+`estimate_eye_distance_cm` measures how far the eyes are from the camera with the
+same pinhole model: `distance = focal_px · EYE_REFERENCE_WIDTH_CM / iod_px`, where
+`iod_px` is the pixel width between the two outer eye corners (MediaPipe landmarks
+33 / 263) and `EYE_REFERENCE_WIDTH_CM` = 9.5 cm is the average adult canthal width.
+The reading is plausibility-gated (20–300 cm), EMA-smoothed across frames
+(`DISTANCE_SMOOTHING_ALPHA` = 0.3) and reported as `GazeResult.distance_cm`.
+
+Absolute accuracy is limited by the assumed field of view and by per-person face
+width (roughly ±10 %), so the value is honest about what it is: a *measured,
+displayed* distance whose **frame-to-frame changes** (which drive drift detection)
+are considerably more accurate than the absolute number. Phase 1's HUD, the Phase 2
+and 3 HUDs and the web sidebar all show it.
 
 ### Feature vector (11 channels)
 
@@ -197,8 +212,26 @@ for constrained setups. Every rejection is counted in `ScreenMapper.stats`.
 
 ### Temporal smoothing
 
-Configurable EMA: `new = α·x + (1−α)·old` with `ema_alpha` (default 0.3, `1` disables).
+Configured with `GazeConfig.smoothing_filter`:
+
+- **`ema`** (default) — `new = α·x + (1−α)·old` with `ema_alpha` (0.3, `1` disables).
+  One knob, but lag and jitter are two ends of the same trade-off.
+- **`oneeuro`** — the adaptive *1 euro filter*: cutoff = `oneeuro_min_cutoff` +
+  `oneeuro_beta·|speed|`, so a still signal is filtered hard (kills jitter) while a
+  fast one passes with almost no added lag. The browser demo defaults to it.
+
 No value is hardcoded; smoothing lag is the trade-off you tune.
+
+### Distance compensation
+
+For a fixed gaze angle the spot on the screen moves linearly with the eye-to-screen
+distance, so when a distance reference exists (set at calibration, persisted in
+`calibration.npz` as `reference_distance_cm`), `ScreenMapper.map` scales the offset
+from the screen centre by `distance_cm / reference_distance_cm` — clamped to
+[0.7, 1.4] so a wrong reading (a different face, a failed estimate) can never
+wreck the mapping. Leaning toward or away from the camera is compensated instead
+of showing up as a systematic offset, and drift past `distance_drift_warn_pct`
+(15 %) raises a recalibration warning.
 
 ---
 
@@ -312,7 +345,8 @@ Reported fields (JSON + CSV, `--report-prefix`, default `evaluation_report`):
 Model · Calibration Method · Number of Calibration Points · Samples per Point
 Mean Error · Median Error · Standard Deviation · 95th Percentile Error · Maximum Error
 Valid Sample Rate · Average Confidence · Recorded Samples
-per-target error · error-by-head-pose · angular error (optional) · model comparison · config
+per-target error · error-by-head-pose · error-by-eye-distance · eye-distance stats
+· angular error (optional) · model comparison · config
 ```
 
 Phase 3 adds fixation detection rate, average fixation duration and saccade count to
@@ -344,6 +378,9 @@ All parameters are centralized in the `GazeConfig` dataclass (`gaze_core.py`):
 | `polynomial_ridge` | 1e-2 | Ridge term for polynomial fit |
 | `mlp_hidden`, `mlp_epochs`, `mlp_learning_rate` | 16, 400, 5e-3 | Optional MLP |
 | `ema_alpha` | 0.3 | EMA smoothing factor (1 = off) |
+| `smoothing_filter` | `ema` | `ema` / `oneeuro` (adaptive: strong when still, light when moving) |
+| `oneeuro_min_cutoff`, `oneeuro_beta`, `oneeuro_d_cutoff` | 1.0, 0.01, 1.0 | 1 € filter Hz / speed weight / derivative smoothing |
+| `distance_drift_warn_pct` | 15.0 | Eye-distance drift from the reference before a warning |
 | `confidence_threshold` | 0.5 | Sample rejection gate |
 | `outlier_max_jump_px` | 0.0 (auto = 1.5 × diagonal) | Implausible-jump limit |
 | `outlier_max_speed_px_s` | 0.0 (disabled) | Optional speed limit |
@@ -375,7 +412,7 @@ python phase2_coordinate_mapping.py --screen 1920x1080          # calibration + 
 python phase2_coordinate_mapping.py --validate --compare-models # validation report
 python phase3_attention_heatmap.py --background camera          # gaze-density heatmap
 python web_app.py                                               # live browser demo (webcam)
-python -m unittest discover -p "test_*.py"                      # offline test suite (73 tests)
+python -m unittest discover -p "test_*.py"                      # offline test suite (98 tests)
 ```
 
 ### Live browser demo (webcam required)
@@ -390,7 +427,11 @@ python web_app.py            # then open http://127.0.0.1:5000
    **calibration** (follow the dot with your eyes only, head still) or skip it for a
    rough centre mapping. Options also cover the mapping model and time decay.
 3. **Watch** the live gaze dot move on the document; the sidebar shows confidence,
-   fps, face detection and the calibration residual.
+   fps, face detection, the measured **eye-to-camera distance** (with a warning when
+   it drifts >15 % from the distance you calibrated at) and the calibration residual.
+   The frame loop runs as fast as the server can answer (~16 ms floor instead of a
+   fixed 80 ms interval), and smoothing defaults to the adaptive 1 € filter so the
+   dot keeps up without jitter.
 4. **Grid view (optional)** — press **Show grid** to overlay a 6×6 grid. Every 5 s a
    coloured digit (0–9, shuffled) pops up in a different cell; look at each digit.
    **Stop grid — fit mapping** refits the screen ↔ camera model from the collected
@@ -399,8 +440,8 @@ python web_app.py            # then open http://127.0.0.1:5000
 5. **Finish — build heatmap report** overlays the accumulated, confidence-weighted
    gaze density on the uploaded document at its natural scale — TURBO colormap,
    blue = low density, red = high density — plus session statistics (fixations,
-   saccades, durations, calibration residual, heatmap parameters, grid-mapping
-   stats when used) and PNG/JSON export.
+   saccades, durations, calibration residual, eye-distance mean/min/max and drift,
+   heatmap parameters, grid-mapping stats when used) and PNG/JSON export.
 
 Everything runs locally: video frames travel only from your browser to
 `127.0.0.1`. The demo reuses the exact pipeline from the CLIs (`EyeTracker` →
@@ -418,20 +459,28 @@ Phase 2: `c` calibrate, `SPACE` capture point, `v` validation, `m` mapping model
 
 Run with `python -m unittest discover -p "test_*.py"` (offline, deterministic):
 
-- **73 tests pass** (57 pipeline + 16 web interface), `pyflakes` is clean on all Python files.
+- **98 tests pass** (78 pipeline + 20 web interface), `pyflakes` is clean on all Python files.
 - Covered: configuration validation, feature-vector construction, head-pose recovery of
   known yaw/pitch/roll from projected landmarks, landmark/head-pose confidence
   behaviour, confidence breakdown, confidence-weighted fusion and its rejection path,
-  eye-quality bounds, temporal confidence, calibration stabilization/collection/
-  outlier rejection/manual capture, robust median, all three mapping models,
-  calibration save/load round-trip, outlier rejection (low confidence, missing
-  features, implausible jumps), EMA smoothing, valid-sample rate, I-DT and I-VT
-  fixation/saccade detection, heatmap confidence gating, fixation weighting,
-  frame-rate-invariant time decay, σ unit conversion, rendering, validation statistics,
+  eye-quality bounds, temporal confidence, eye-to-camera distance estimation (pinhole
+  value, inverse IOD scaling, plausibility limits, EMA smoothing, keep-on-face-loss),
+  the 1 € filter (constant signal, step response, EMA comparison, time guards), 
+  calibration stabilization/collection/outlier rejection/manual capture, robust median,
+  all three mapping models, calibration save/load round-trip (including the persisted
+  distance reference), distance compensation (scaling, clamping, absence cases),
+  outlier rejection (low confidence, missing features, implausible jumps), EMA
+  smoothing, valid-sample rate, I-DT and I-VT fixation/saccade detection, heatmap
+  confidence gating, fixation weighting, frame-rate-invariant time decay, σ unit
+  conversion, rendering, validation statistics (including per-distance buckets),
   report/CSV export, head-pose condition buckets, model comparison, and a synthetic
   end-to-end Phase 1 run of the real `EyeTracker.process` (stubbed MediaPipe landmarks)
-  that checks eye extraction, feature vector, head-pose recovery and all five
-  confidence components.
+  that checks eye extraction, feature vector, head-pose recovery, all five
+  confidence components and the distance estimate scaling when the face moves back.
+- Web interface: session lifecycle, distance frame fields (reference, drift %,
+  warning), calibration distance reference, report distance statistics, smoothing
+  selection, real MediaPipe frame path on face-less frames, calibration fitting,
+  heatmap report rendering and the blue→red colormap endpoints.
 - Web interface (`test_webapp.py`): session/frame/finish/reset endpoint contracts and
   error paths, the real MediaPipe frame path on face-less frames, calibration
   stabilization → fit → residual reporting, report generation with the real

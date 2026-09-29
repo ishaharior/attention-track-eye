@@ -4,7 +4,7 @@ Responsibilities:
 - 5 / 9 / 13 point calibration with stabilization, multi-sample collection,
   low-confidence rejection and MAD-based outlier rejection
 - mapping models: affine (baseline), polynomial, optional small MLP
-- outlier rejection + configurable EMA smoothing
+- outlier rejection + EMA / adaptive 1-euro smoothing
 - screen-space validation mode with quantitative error metrics
 - evaluation report export (JSON + CSV)
 """
@@ -207,10 +207,22 @@ class ValidationRecord:
     yaw: Optional[float] = None
     pitch: Optional[float] = None
     roll: Optional[float] = None
+    distance_cm: Optional[float] = None
 
     @property
     def error_px(self) -> float:
         return math.hypot(self.predicted_x - self.target_x, self.predicted_y - self.target_y)
+
+
+def distance_condition(distance_cm: Optional[float]) -> str:
+    """Bucket a sample by eye-to-camera distance (how far the user sat)."""
+    if distance_cm is None:
+        return "unknown"
+    if distance_cm < 45.0:
+        return "near (<45 cm)"
+    if distance_cm <= 70.0:
+        return "typical (45-70 cm)"
+    return "far (>70 cm)"
 
 
 @dataclass
@@ -266,6 +278,7 @@ class ValidationRun:
         confidence: float,
         head_pose: Optional[HeadPose] = None,
         features: Optional[np.ndarray] = None,
+        distance_cm: Optional[float] = None,
     ) -> str:
         """Advance one frame and record a prediction when the target is stable."""
         if not self.active:
@@ -293,6 +306,7 @@ class ValidationRun:
                 yaw=head_pose.yaw if head_pose and head_pose.valid else None,
                 pitch=head_pose.pitch if head_pose and head_pose.valid else None,
                 roll=head_pose.roll if head_pose and head_pose.valid else None,
+                distance_cm=None if distance_cm is None else float(distance_cm),
             )
         )
         self.collected += 1
@@ -341,10 +355,35 @@ def summarize_validation(
         condition_errors.setdefault(condition, []).append(record.error_px)
     for condition, values in sorted(condition_errors.items()):
         conditions[condition] = error_statistics(values)
+    # accuracy vs eye-to-camera distance: leans toward/away from the camera
+    # shifts the projected gaze angle, so error is bucketed by measured distance
+    # (samples without a distance are kept as "unknown", like head pose)
+    distance_errors: Dict[str, List[float]] = {}
+    distances = [
+        record.distance_cm for record in records if record.distance_cm is not None
+    ]
+    for record in records:
+        distance_errors.setdefault(distance_condition(record.distance_cm), []).append(
+            record.error_px
+        )
+    by_distance = {
+        condition: error_statistics(values)
+        for condition, values in sorted(distance_errors.items())
+    }
+    distance_stats: Optional[Dict[str, float]] = None
+    if distances:
+        distance_stats = {
+            "mean_cm": float(np.mean(distances)),
+            "min_cm": float(np.min(distances)),
+            "max_cm": float(np.max(distances)),
+            "count": float(len(distances)),
+        }
     return {
         "overall": summary,
         "per_target": per_target,
         "by_head_pose": conditions,
+        "by_distance": by_distance,
+        "distance_cm": distance_stats,
         "average_confidence": float(np.mean(confidences)) if confidences else 0.0,
         "valid_sample_rate": float(len(records) / attempts) if attempts else 0.0,
         "recorded_samples": len(records),
@@ -419,6 +458,8 @@ def build_report(
         "recorded_samples": validation.get("recorded_samples"),
         "per_target_error_px": validation.get("per_target"),
         "error_by_head_pose_px": validation.get("by_head_pose"),
+        "error_by_distance_px": validation.get("by_distance"),
+        "eye_distance_cm": validation.get("distance_cm"),
         "angular_error_degrees": angular,
         "model_comparison": comparisons,
         "config": as_config_dict(config),
@@ -591,9 +632,13 @@ def build_config(args: argparse.Namespace, screen: Tuple[int, int]) -> GazeConfi
     return config
 
 
-def handle_calibration_done(calibrator: ScreenCalibrator, mapper: ScreenMapper) -> str:
+def handle_calibration_done(
+    calibrator: ScreenCalibrator,
+    mapper: ScreenMapper,
+    distance_cm: Optional[float] = None,
+) -> str:
     samples = calibrator.finalize()
-    if mapper.fit(samples):
+    if mapper.fit(samples, reference_distance_cm=distance_cm):
         print(
             f"calibration saved to {mapper.path} "
             f"({len(samples)} samples, {calibrator.n_points} points, "
@@ -687,12 +732,19 @@ def main() -> int:
                 elif state == "captured":
                     status_text = f"captured point {calibrator.index}/{len(calibrator.targets)}"
                 elif state == "done":
-                    status_text = handle_calibration_done(calibrator, mapper)
+                    status_text = handle_calibration_done(
+                        calibrator, mapper, result.distance_cm
+                    )
 
             # -- validation -------------------------------------------------
             if validation.active:
-                position = mapper.map(gaze, features, confidence)
-                state = validation.step(position, confidence, result.head_pose, features)
+                position = mapper.map(
+                    gaze, features, confidence, distance_cm=result.distance_cm
+                )
+                state = validation.step(
+                    position, confidence, result.head_pose, features,
+                    distance_cm=result.distance_cm,
+                )
                 if state == "done":
                     summary = summarize_validation(validation.records, validation.attempts)
                     comparisons = None
@@ -754,7 +806,9 @@ def main() -> int:
                         f"({validation.collected}/{validation.samples_per_target})"
                     )
             else:
-                position = mapper.map(gaze, features, confidence)
+                position = mapper.map(
+                    gaze, features, confidence, distance_cm=result.distance_cm
+                )
 
             if position is not None:
                 trail.append(position)
@@ -821,7 +875,9 @@ def main() -> int:
             elif key == ord(" ") and calibrator.active:
                 state = calibrator.record(features, confidence)
                 if state == "done":
-                    status_text = handle_calibration_done(calibrator, mapper)
+                    status_text = handle_calibration_done(
+                        calibrator, mapper, result.distance_cm
+                    )
                 else:
                     status_text = "captured manually"
             elif key == ord("m"):
@@ -878,6 +934,8 @@ def _confidence_line(result: GazeResult) -> str:
     pose_text = "pose=--"
     if pose is not None and pose.valid:
         pose_text = f"pose y{pose.yaw:+.0f} p{pose.pitch:+.0f} r{pose.roll:+.0f}"
+    if result.distance_cm is not None:
+        pose_text += f"  d={result.distance_cm:.0f}cm"
     if conf is None:
         return f"{pose_text}  confidence breakdown unavailable"
     return (

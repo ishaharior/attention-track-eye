@@ -25,11 +25,13 @@ from gaze_core import (
     GazeConfig,
     HeadPose,
     MappingSample,
+    OneEuroFilter,
     ScreenCalibrator,
     ScreenMapper,
     build_feature_vector,
     build_mapping_model,
     eye_quality,
+    estimate_eye_distance_cm,
     estimate_head_pose,
     fuse_eye_gazes,
     landmark_confidence,
@@ -41,6 +43,7 @@ from phase2_coordinate_mapping import (
     ValidationRun,
     angular_error_degrees,
     build_report,
+    distance_condition,
     error_statistics,
     evaluate_models_on_features,
     save_report,
@@ -110,6 +113,21 @@ class TestConfiguration(unittest.TestCase):
             GazeConfig(ema_alpha=0.0).validate()
         with self.assertRaises(ValueError):
             GazeConfig(calibration_points=7).validate()
+
+    def test_smoothing_and_distance_keys_are_validated(self):
+        GazeConfig(smoothing_filter="oneeuro").validate()
+        GazeConfig(smoothing_filter="ema").validate()
+        for kwargs in (
+            {"smoothing_filter": "median"},
+            {"oneeuro_min_cutoff": 0.0},
+            {"oneeuro_d_cutoff": -1.0},
+            {"oneeuro_beta": -0.01},
+            {"distance_drift_warn_pct": 0.0},
+        ):
+            with self.assertRaises(ValueError, msg=kwargs):
+                GazeConfig(**kwargs).validate()
+        self.assertEqual(GazeConfig().smoothing_filter, "ema")   # documented default
+        self.assertEqual(GazeConfig().distance_drift_warn_pct, 15.0)
 
     def test_target_layouts(self):
         self.assertEqual({k: len(v) for k, v in gc.TARGET_LAYOUTS.items()}, {5: 5, 9: 9, 13: 13})
@@ -437,6 +455,203 @@ class TestScreenMapper(unittest.TestCase):
         mapper.map((0.5, 0.5), confidence=0.05)
         self.assertAlmostEqual(mapper.valid_sample_rate, 0.5)
 
+    # -- eye-to-camera distance ------------------------------------------
+    @staticmethod
+    def _raw_mapper(path, **kwargs):
+        """Uncalibrated gain mapper with no auto-centring (x = gx offset)."""
+        return ScreenMapper(*SCREEN, path=path, gain=1.0, smoothing=1.0,
+                            auto_center=False, warmup_frames=1, **kwargs)
+
+    def test_distance_compensation_scales_offset_from_centre(self):
+        mapper = self._raw_mapper(self.path)
+        mapper.set_reference_distance(50.0)
+        baseline = mapper.map((0.6, 0.5), confidence=1.0)          # reference distance
+        leaning = mapper.map((0.6, 0.5), confidence=1.0, distance_cm=70.0)
+        self.assertIsNotNone(baseline)
+        self.assertIsNotNone(leaning)
+        offset = baseline[0] - SCREEN[0] / 2.0                     # 192 px right of centre
+        compensated = leaning[0] - SCREEN[0] / 2.0
+        self.assertAlmostEqual(compensated / offset, 70.0 / 50.0, delta=0.02)
+        self.assertAlmostEqual(leaning[1], baseline[1], delta=1e-6)  # centred vertically
+
+    def test_distance_compensation_is_clamped(self):
+        mapper = self._raw_mapper(self.path)
+        mapper.set_reference_distance(50.0)
+        baseline = mapper.map((0.6, 0.5), confidence=1.0)
+        offset = baseline[0] - SCREEN[0] / 2.0
+        # absurdly far (ratio 10) and absurdly close (ratio 0.1) both clamp
+        far = mapper.map((0.6, 0.5), confidence=1.0, distance_cm=500.0)
+        near = mapper.map((0.6, 0.5), confidence=1.0, distance_cm=5.0)
+        self.assertAlmostEqual((far[0] - SCREEN[0] / 2.0) / offset,
+                               gc.DISTANCE_COMPENSATION_MAX, delta=0.01)
+        self.assertAlmostEqual((near[0] - SCREEN[0] / 2.0) / offset,
+                               gc.DISTANCE_COMPENSATION_MIN, delta=0.01)
+
+    def test_no_compensation_without_reference_or_distance(self):
+        no_reference = self._raw_mapper(self.path)
+        without = no_reference.map((0.6, 0.5), confidence=1.0, distance_cm=70.0)
+        with_distance = no_reference.map((0.6, 0.5), confidence=1.0, distance_cm=None)
+        self.assertEqual(without, with_distance)
+
+        with_reference = self._raw_mapper(self.path)
+        with_reference.set_reference_distance(70.0)
+        first = with_reference.map((0.6, 0.5), confidence=1.0, distance_cm=70.0)
+        second = with_reference.map((0.6, 0.5), confidence=1.0, distance_cm=None)
+        self.assertEqual(first, second)
+
+    def test_set_reference_distance_rejects_implausible_values(self):
+        mapper = self._raw_mapper(self.path)
+        for value in (None, 5.0, 500.0, float("nan"), "far"):
+            mapper.set_reference_distance(value)
+            self.assertIsNone(mapper.reference_distance_cm)
+        mapper.set_reference_distance(60.0)
+        self.assertEqual(mapper.reference_distance_cm, 60.0)
+        mapper.set_reference_distance(75.0)   # plausible updates win
+        self.assertEqual(mapper.reference_distance_cm, 75.0)
+
+    def test_reference_distance_survives_the_calibration_file(self):
+        samples = synthetic_calibration_samples()
+        mapper = ScreenMapper(*SCREEN, path=self.path, config=GazeConfig(), smoothing=1.0)
+        mapper.reset()
+        self.assertTrue(mapper.fit(samples, reference_distance_cm=52.0))
+        reloaded = ScreenMapper(*SCREEN, path=self.path, config=GazeConfig(), smoothing=1.0)
+        self.assertEqual(reloaded.reference_distance_cm, 52.0)
+        # refitting without a new distance keeps the recorded reference
+        self.assertTrue(mapper.fit(samples))
+        self.assertEqual(mapper.reference_distance_cm, 52.0)
+
+    def test_distance_never_pollutes_the_valid_sample_rate(self):
+        mapper = self._raw_mapper(self.path)
+        mapper.set_reference_distance(50.0)
+        self.assertIsNotNone(mapper.map((0.5, 0.5), confidence=1.0, distance_cm=70.0))
+        self.assertIsNone(mapper.map((0.5, 0.5), confidence=0.05, distance_cm=70.0))
+        self.assertAlmostEqual(mapper.valid_sample_rate, 0.5)
+        # only rejection counters live in stats (the rate divides by their sum)
+        self.assertEqual(
+            set(mapper.stats),
+            {"accepted", "rejected_low_confidence", "rejected_off_screen",
+             "rejected_jump", "rejected_missing_features"},
+        )
+
+    def test_oneeuro_filter_engaged_when_configured(self):
+        config = GazeConfig(smoothing_filter="oneeuro")
+        mapper = self._raw_mapper(self.path, config=config)
+        position = mapper.map((0.6, 0.5), confidence=1.0)
+        self.assertIsNotNone(position)
+        self.assertIsNotNone(mapper._euro_x._value)
+        self.assertEqual(mapper._smoothed[0], mapper._euro_x._value)
+        # default EMA config never touches the adaptive filter
+        ema_mapper = self._raw_mapper(self.path)
+        ema_mapper.map((0.6, 0.5), confidence=1.0)
+        self.assertIsNone(ema_mapper._euro_x._value)
+
+    def test_recenter_and_reset_clear_the_adaptive_filter(self):
+        mapper = self._raw_mapper(self.path, config=GazeConfig(smoothing_filter="oneeuro"))
+        mapper.map((0.6, 0.5), confidence=1.0)
+        self.assertIsNotNone(mapper._euro_x._value)
+        mapper.recenter()
+        self.assertIsNone(mapper._euro_x._value)
+        mapper.map((0.6, 0.5), confidence=1.0)
+        mapper.reset()
+        self.assertIsNone(mapper._euro_x._value)
+
+
+class TestOneEuroFilter(unittest.TestCase):
+    def test_constant_signal_passes_unchanged(self):
+        filt = OneEuroFilter(min_cutoff=1.0, beta=0.01)
+        values = [filt.filter(42.0, i * 0.016) for i in range(20)]
+        for value in values:
+            self.assertAlmostEqual(value, 42.0, places=6)
+
+    def test_step_response_is_fast_then_settles(self):
+        filt = OneEuroFilter(min_cutoff=1.0, beta=0.01)
+        for i in range(10):
+            filt.filter(0.0, i * 0.016)
+        step = [filt.filter(100.0, 0.16 + i * 0.016) for i in range(150)]
+        # speed raises the cutoff: most of the jump happens in the first frames
+        self.assertGreater(step[0], 40.0)
+        self.assertGreater(step[4], 80.0)
+        self.assertGreater(step[-1], 99.0)   # and the low cutoff settles it
+
+    def test_moves_faster_than_a_fixed_ema_while_moving(self):
+        one_hz = OneEuroFilter(min_cutoff=1.0, beta=0.01)
+        for i in range(10):
+            one_hz.filter(0.0, i * 0.016)
+        alpha = 0.15
+        ema = 0.0
+        one_out = ema_out = 0.0
+        for i in range(10):
+            t = 0.16 + i * 0.016
+            one_out = one_hz.filter(100.0, t)
+            ema = alpha * 100.0 + (1.0 - alpha) * ema
+            ema_out = ema
+        self.assertGreater(one_out, ema_out)
+
+    def test_holds_output_on_non_monotonic_time(self):
+        filt = OneEuroFilter()
+        filt.filter(10.0, 1.0)
+        self.assertEqual(filt.filter(999.0, 0.5), 10.0)
+
+    def test_reset_forgets_state(self):
+        filt = OneEuroFilter()
+        filt.filter(10.0, 1.0)
+        filt.reset()
+        self.assertEqual(filt.filter(50.0, 2.0), 50.0)
+
+
+class TestEyeDistance(unittest.TestCase):
+    @staticmethod
+    def landmarks(iod_px: float) -> np.ndarray:
+        points = np.zeros((478, 2), dtype=np.float32)
+        points[33] = (320.0 - iod_px / 2.0, 240.0)
+        points[263] = (320.0 + iod_px / 2.0, 240.0)
+        return points
+
+    def test_pinhole_value_and_inverse_scaling(self):
+        near = estimate_eye_distance_cm(self.landmarks(300.0), 640, 480)
+        far = estimate_eye_distance_cm(self.landmarks(150.0), 640, 480)
+        self.assertIsNotNone(near)
+        self.assertIsNotNone(far)
+        focal = 640 * gc.CAMERA_FOCAL_SCALE
+        self.assertAlmostEqual(near, focal * gc.EYE_REFERENCE_WIDTH_CM / 300.0, delta=0.5)
+        self.assertAlmostEqual(far / near, 2.0, delta=0.01)   # half the IOD, twice the distance
+
+    def test_rejects_missing_or_implausible_input(self):
+        self.assertIsNone(estimate_eye_distance_cm(None, 640, 480))
+        self.assertIsNone(estimate_eye_distance_cm(self.landmarks(300.0), 0, 480))
+        self.assertIsNone(estimate_eye_distance_cm(self.landmarks(300.0), 640, 0))
+        self.assertIsNone(estimate_eye_distance_cm(np.zeros((10, 2), np.float32), 640, 480))
+        # 600 px IOD at 640 wide -> ~11 cm, below the plausible webcam minimum
+        self.assertIsNone(estimate_eye_distance_cm(self.landmarks(600.0), 640, 480))
+        # 4 px IOD -> ~1.6 km, far beyond the plausible maximum
+        self.assertIsNone(estimate_eye_distance_cm(self.landmarks(4.0), 640, 480))
+        # degenerate (identical) points
+        self.assertIsNone(estimate_eye_distance_cm(self.landmarks(0.0), 640, 480))
+
+    def test_tracker_smooths_and_keeps_distance(self):
+        # bypass EyeTracker.__init__ (loads MediaPipe); only the distance state is used
+        tracker = gc.EyeTracker.__new__(gc.EyeTracker)
+        tracker.distance_cm = None
+        near = estimate_eye_distance_cm(self.landmarks(300.0), 640, 480)
+        far = estimate_eye_distance_cm(self.landmarks(150.0), 640, 480)
+        first = tracker._update_distance(self.landmarks(300.0), 640, 480)
+        self.assertAlmostEqual(first, near)
+        # the EMA moves toward the farther reading but never past it in one frame
+        second = tracker._update_distance(self.landmarks(150.0), 640, 480)
+        self.assertGreater(second, near)
+        self.assertLess(second, far)
+        self.assertAlmostEqual(
+            second,
+            gc.DISTANCE_SMOOTHING_ALPHA * far + (1.0 - gc.DISTANCE_SMOOTHING_ALPHA) * near,
+        )
+        # face lost: no fresh reading, but the smoothed value stays as reference
+        self.assertIsNone(tracker._update_distance(None, 640, 480))
+        self.assertEqual(tracker.distance_cm, second)
+
+    def test_gaze_result_defaults_to_no_distance(self):
+        result = gc.GazeResult(None, 0.0)
+        self.assertIsNone(result.distance_cm)
+
 
 class TestFixationDetection(unittest.TestCase):
     def trajectory(self, fps=30):
@@ -728,6 +943,46 @@ class TestValidation(unittest.TestCase):
         self.assertAlmostEqual(summary["valid_sample_rate"], 27 / 60, places=5)
         self.assertIn("per_target", summary)
         self.assertIn("by_head_pose", summary)
+        self.assertIn("by_distance", summary)   # no distances measured -> unknown bucket
+        self.assertEqual(summary["by_distance"]["unknown"]["count"], 27)
+        self.assertIsNone(summary["distance_cm"])
+
+    def test_validation_buckets_error_by_eye_distance(self):
+        self.assertEqual(distance_condition(None), "unknown")
+        self.assertEqual(distance_condition(40.0), "near (<45 cm)")
+        self.assertEqual(distance_condition(60.0), "typical (45-70 cm)")
+        self.assertEqual(distance_condition(90.0), "far (>70 cm)")
+
+        run = ValidationRun(*SCREEN, gc.TARGET_LAYOUTS[5], samples_per_target=2,
+                            stabilize_frames=1, min_confidence=0.3)
+        run.start()
+        target = run.target_px
+        run.step((target[0], target[1]), 0.9, distance_cm=40.0)
+        run.step((target[0], target[1]), 0.9, distance_cm=80.0)
+        self.assertEqual(len(run.records), 2)
+        summary = summarize_validation(run.records, attempts=2)
+        self.assertEqual(summary["by_distance"]["near (<45 cm)"]["count"], 1)
+        self.assertEqual(summary["by_distance"]["far (>70 cm)"]["count"], 1)
+        stats = summary["distance_cm"]
+        self.assertAlmostEqual(stats["mean_cm"], 60.0)
+        self.assertAlmostEqual(stats["min_cm"], 40.0)
+        self.assertAlmostEqual(stats["max_cm"], 80.0)
+        # samples without a distance fall into their own bucket instead of vanishing
+        run2 = ValidationRun(*SCREEN, gc.TARGET_LAYOUTS[5], samples_per_target=1,
+                             stabilize_frames=1, min_confidence=0.3)
+        run2.start()
+        target = run2.target_px
+        run2.step((target[0], target[1]), 0.9)
+        summary2 = summarize_validation(run2.records, attempts=1)
+        self.assertEqual(summary2["by_distance"]["unknown"]["count"], 1)
+        self.assertIsNone(summary2["distance_cm"])
+        # the report exposes both new structures
+        report = build_report(
+            model="affine", calibration_method="test", calibration_points=5,
+            samples_per_point=1, validation=summary,
+        )
+        self.assertEqual(report["error_by_distance_px"], summary["by_distance"])
+        self.assertEqual(report["eye_distance_cm"], summary["distance_cm"])
 
     def test_low_confidence_is_invalid(self):
         run = ValidationRun(*SCREEN, gc.TARGET_LAYOUTS[5], samples_per_target=2,
@@ -898,6 +1153,7 @@ class TestEyeTrackerSynthetic(unittest.TestCase):
         from gaze_core import EyeTracker
 
         self.tracker = EyeTracker(config=GazeConfig())
+        self.real_mesh = self.tracker.mesh
         self.image_points = self.project(self.model_landmarks(yaw=4.0, pitch=-3.0, roll=2.0))
         self.tracker.mesh = self.stub_mesh(self.image_points)
         self.frame = self.synthetic_frame(self.image_points)
@@ -946,6 +1202,33 @@ class TestEyeTrackerSynthetic(unittest.TestCase):
         self.assertEqual(view.shape, self.frame.shape)
         crops = self.tracker.draw_crops(result, scale=1.0)
         self.assertGreater(crops.size, 0)
+
+    def test_distance_estimate_grows_when_the_face_moves_back(self):
+        near = self.tracker.process(self.frame)
+        self.assertIsNotNone(near.distance_cm)
+        self.assertGreater(near.distance_cm, gc.EYE_DISTANCE_MIN_CM)
+        self.assertLess(near.distance_cm, gc.EYE_DISTANCE_MAX_CM)
+        # same face 1.5x farther: the inter-ocular width shrinks, so the
+        # pinhole estimate grows (the EMA only moves part-way in one frame)
+        far_points = self.project(
+            self.model_landmarks(yaw=4.0, pitch=-3.0, roll=2.0)
+            + np.array([0.0, 0.0, self.DISTANCE * 0.5])
+        )
+        self.tracker.mesh = self.stub_mesh(far_points)
+        far = self.tracker.process(self.synthetic_frame(far_points))
+        self.assertIsNotNone(far.distance_cm)
+        self.assertGreater(far.distance_cm, near.distance_cm)
+        self.assertLess(far.distance_cm, 1.5 * near.distance_cm + 1.0)
+        self.assertAlmostEqual(self.tracker.distance_cm, far.distance_cm)
+
+    def test_distance_kept_when_the_face_is_lost(self):
+        seen = self.tracker.process(self.frame)
+        self.assertIsNotNone(seen.distance_cm)
+        self.tracker.mesh = self.real_mesh
+        lost = self.tracker.process(np.full_like(self.frame, 240, dtype=np.uint8))
+        self.assertIsNone(lost.gaze)
+        self.assertIsNone(lost.distance_cm)
+        self.assertEqual(self.tracker.distance_cm, seen.distance_cm)
 
 
 if __name__ == "__main__":

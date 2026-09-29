@@ -428,6 +428,7 @@ def draw_hud(
     show_blur: bool,
     confidence: float = 0.0,
     decay_on: bool = True,
+    distance_cm: Optional[float] = None,
 ) -> None:
     x_scale = canvas.shape[1] / mapper.width
     y_scale = canvas.shape[0] / mapper.height
@@ -440,8 +441,9 @@ def draw_hud(
         xy = f"X={position[0]:7.1f} Y={position[1]:7.1f}"
     else:
         xy = "X=----- Y=-----"
+    distance = f"  d={distance_cm:.0f}cm" if distance_cm is not None else ""
     header = (
-        f"fps={fps:4.1f}  {xy}  conf={confidence:.2f}  "
+        f"fps={fps:4.1f}  {xy}  conf={confidence:.2f}{distance}  "
         f"points={heat.total_hits}  peak={heat.peak():6.1f}  {mapper.mapping_name}"
     )
     if not mapper.calibrated:
@@ -718,7 +720,7 @@ def main() -> int:
                     status = f"calibrating {calibrator.index}/{len(calibrator.targets)}"
                 elif state == "done":
                     samples = calibrator.finalize()
-                    if mapper.fit(samples):
+                    if mapper.fit(samples, reference_distance_cm=result.distance_cm):
                         status = "calibration saved"
                         print(f"calibration saved to {mapper.path}")
                     else:
@@ -726,7 +728,9 @@ def main() -> int:
                 elif state in ("stabilizing", "collecting"):
                     status = "hold still on the target"
 
-            position = mapper.map(gaze, features, confidence)
+            position = mapper.map(
+                gaze, features, confidence, distance_cm=result.distance_cm
+            )
 
             # -- fixation / saccade classification -------------------------
             label = "invalid"
@@ -771,6 +775,7 @@ def main() -> int:
             draw_hud(
                 composite, mapper, heat, detector, fps, position, status,
                 show_blur, confidence, decay_on,
+                distance_cm=result.distance_cm,
             )
             draw_events(composite, detector, composite.shape[1] / max(mapper.width, 1))
 
@@ -843,7 +848,7 @@ def main() -> int:
                 state = calibrator.record(features, confidence)
                 if state == "done":
                     samples = calibrator.finalize()
-                    if mapper.fit(samples):
+                    if mapper.fit(samples, reference_distance_cm=result.distance_cm):
                         status = "calibration saved"
                         print(f"calibration saved to {mapper.path}")
     finally:

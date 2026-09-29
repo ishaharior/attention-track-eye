@@ -104,6 +104,16 @@ class GazeConfig:
 
     # temporal smoothing / outliers
     ema_alpha: float = 0.3
+    # "ema" (fixed factor, the documented default) or "oneeuro" (adaptive:
+    # strong smoothing while the gaze is still, almost none while it moves, so
+    # jitter and lag improve together instead of trading off)
+    smoothing_filter: str = "ema"
+    oneeuro_min_cutoff: float = 1.0  # Hz, cutoff while the signal is still
+    oneeuro_beta: float = 0.01  # speed weight: higher = less lag while moving
+    oneeuro_d_cutoff: float = 1.0  # Hz, derivative smoothing
+    # eye-to-camera distance must drift at least this far (%) from the
+    # reference (calibration) distance before clients are told to recalibrate
+    distance_drift_warn_pct: float = 15.0
     confidence_threshold: float = 0.5
     # 0.0 = auto (1.5 x screen diagonal).  Deliberately beyond any reachable
     # on-screen jump so legitimate saccades are never rejected for being fast;
@@ -145,6 +155,14 @@ class GazeConfig:
             raise ValueError(f"unknown mapping_model: {self.mapping_model!r}")
         if self.fixation_method not in ("idt", "ivt"):
             raise ValueError(f"unknown fixation_method: {self.fixation_method!r}")
+        if self.smoothing_filter not in ("ema", "oneeuro"):
+            raise ValueError(f"unknown smoothing_filter: {self.smoothing_filter!r}")
+        if self.oneeuro_min_cutoff <= 0.0 or self.oneeuro_d_cutoff <= 0.0:
+            raise ValueError("oneeuro cutoffs must be > 0")
+        if self.oneeuro_beta < 0.0:
+            raise ValueError("oneeuro_beta must be >= 0")
+        if self.distance_drift_warn_pct <= 0.0:
+            raise ValueError("distance_drift_warn_pct must be > 0")
         if not 0.0 < self.ema_alpha <= 1.0:
             raise ValueError("ema_alpha must be in (0, 1]")
         if self.calibration_points not in TARGET_LAYOUTS:
@@ -234,10 +252,26 @@ HEAD_POSE_MODEL = np.array(
 HEAD_POSE_LIMITS = (60.0, 50.0, 45.0)
 LANDMARK_LEFT_RIGHT_EYE = (33, 263)
 
+# pinhole constant shared by head pose and the eye-distance estimate
+CAMERA_FOCAL_SCALE = 1.1  # focal_px = CAMERA_FOCAL_SCALE * max(frame dims) ~ 60 deg HFOV
+# average adult distance between the outer eye corners (landmarks 33 <-> 263).
+# Absolute accuracy of the estimate is dominated by this per-person value and by
+# the assumed field of view: expect roughly +/-10% in cm, while frame-to-frame
+# *changes* (which drive drift detection) are considerably more accurate.
+EYE_REFERENCE_WIDTH_CM = 9.5
+EYE_DISTANCE_MIN_CM = 20.0
+EYE_DISTANCE_MAX_CM = 300.0
+# EMA factor for the reported distance (frames; the raw estimate is noisy)
+DISTANCE_SMOOTHING_ALPHA = 0.3
+# clamp on the distance compensation ratio applied to gaze offsets; beyond
+# this the estimate probably reflects a different face/person, not leaning
+DISTANCE_COMPENSATION_MIN = 0.7
+DISTANCE_COMPENSATION_MAX = 1.4
+
 
 def _camera_matrix(width: int, height: int) -> np.ndarray:
     """Pinhole model with a ~60 deg horizontal field of view (typical webcam)."""
-    focal = float(max(width, height)) * 1.1
+    focal = float(max(width, height)) * CAMERA_FOCAL_SCALE
     return np.array(
         [[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]],
         dtype=np.float64,
@@ -363,6 +397,39 @@ def landmark_confidence(
         shift = float(np.mean(np.linalg.norm(points - previous_points, axis=1)))
         stability = float(np.clip(1.0 - (shift / iod) / 0.12, 0.0, 1.0))
     return float(np.clip(0.45 * size_term + 0.55 * stability, 0.0, 1.0))
+
+
+def estimate_eye_distance_cm(
+    points: Optional[np.ndarray],
+    width: int,
+    height: int,
+) -> Optional[float]:
+    """Eye-to-camera distance in centimetres from the inter-ocular pixel width.
+
+    Pinhole relation: ``distance = focal_px * reference_width_cm / iod_px`` with
+    ``focal_px = CAMERA_FOCAL_SCALE * max(width, height)`` (the same camera
+    model `estimate_head_pose` solves against) and ``iod_px`` the pixel
+    distance between the two outer eye corners.
+
+    Returns ``None`` when the landmarks are missing/degenerate or the result
+    falls outside the plausible 20-300 cm webcam range.
+    """
+    if points is None or len(points) <= max(LANDMARK_LEFT_RIGHT_EYE):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    left = np.asarray(points[LANDMARK_LEFT_RIGHT_EYE[0]], dtype=np.float64)
+    right = np.asarray(points[LANDMARK_LEFT_RIGHT_EYE[1]], dtype=np.float64)
+    iod = float(np.linalg.norm(left - right))
+    if not math.isfinite(iod) or iod < 1.0:
+        return None
+    focal = float(max(width, height)) * CAMERA_FOCAL_SCALE
+    distance = focal * EYE_REFERENCE_WIDTH_CM / iod
+    if not math.isfinite(distance):
+        return None
+    if distance < EYE_DISTANCE_MIN_CM or distance > EYE_DISTANCE_MAX_CM:
+        return None
+    return float(distance)
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +748,8 @@ class GazeResult:
     features: Optional[np.ndarray] = None
     head_pose: Optional[HeadPose] = None
     confidences: Optional[ConfidenceBreakdown] = None
+    # EMA-smoothed eye-to-camera distance for this frame (None without a face)
+    distance_cm: Optional[float] = None
 
     @property
     def valid(self) -> bool:
@@ -727,6 +796,20 @@ class EyeTracker:
         self._previous_pose: Optional[HeadPose] = None
         self._previous_eye_gaze: Dict[str, Tuple[float, float]] = {}
         self._previous_time: Optional[float] = None
+        # smoothed eye-to-camera distance; retained across face-lost frames so a
+        # session can keep it as the calibration/drift reference
+        self.distance_cm: Optional[float] = None
+
+    def _update_distance(self, points: Optional[np.ndarray], width: int, height: int) -> Optional[float]:
+        raw = estimate_eye_distance_cm(points, width, height)
+        if raw is None:
+            return None
+        if self.distance_cm is None:
+            self.distance_cm = raw
+        else:
+            a = DISTANCE_SMOOTHING_ALPHA
+            self.distance_cm = a * raw + (1.0 - a) * self.distance_cm
+        return self.distance_cm
 
     def close(self) -> None:
         try:
@@ -779,6 +862,7 @@ class EyeTracker:
             return GazeResult(None, 0.0, [], inference_ms)
         landmarks = raw.multi_face_landmarks[0].landmark
         points = np.array([[p.x * width, p.y * height] for p in landmarks], dtype=np.float32)
+        distance_cm = self._update_distance(points, width, height)
 
         eyes: List[EyeObservation] = []
         for outer_i, top_i, inner_i, bottom_i, iris_i, contour_ids in EYE_TEMPLATES:
@@ -855,7 +939,10 @@ class EyeTracker:
                 landmark=landmark_conf,
                 head_pose=head_pose.confidence if head_pose.valid else 0.0,
             )
-            return GazeResult(None, 0.0, [], inference_ms, None, head_pose, breakdown)
+            return GazeResult(
+                None, 0.0, [], inference_ms, None, head_pose, breakdown,
+                distance_cm=distance_cm,
+            )
 
         eyes.sort(key=lambda eye: float(eye.contour_frame[:, 0].mean()))
         eyes[0].side = "image-left"
@@ -916,9 +1003,15 @@ class EyeTracker:
         self._remember(points, fused, head_pose, eyes)
 
         if fused is None:
-            return GazeResult(None, 0.0, eyes, inference_ms, features, head_pose, breakdown)
+            return GazeResult(
+                None, 0.0, eyes, inference_ms, features, head_pose, breakdown,
+                distance_cm=distance_cm,
+            )
         confidence = breakdown.combined(self.config.confidence_weights)
-        return GazeResult(fused, confidence, eyes, inference_ms, features, head_pose, breakdown)
+        return GazeResult(
+            fused, confidence, eyes, inference_ms, features, head_pose, breakdown,
+            distance_cm=distance_cm,
+        )
 
     def _remember(
         self,
@@ -1403,11 +1496,70 @@ def build_mapping_model(name: str, config: Optional[GazeConfig] = None) -> Mappi
     raise ValueError(f"unknown mapping model: {name!r}")
 
 
+class OneEuroFilter:
+    """Adaptive low-pass filter (Casiez et al., the "1 euro filter").
+
+    The cutoff frequency rises with the measured speed::
+
+        cutoff = min_cutoff + beta * |dx/dt|
+
+    so a still signal is filtered hard (kills jitter) while a fast one passes
+    with almost no added lag — jitter and lag stop being two ends of one knob.
+    `t` is in seconds and must be monotonic between calls.
+    """
+
+    def __init__(
+        self,
+        min_cutoff: float = 1.0,
+        beta: float = 0.01,
+        d_cutoff: float = 1.0,
+    ) -> None:
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self._value: Optional[float] = None
+        self._previous: Optional[float] = None
+        self._speed: float = 0.0
+        self._time: Optional[float] = None
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        """Smoothing factor of a low-pass with the given cutoff at spacing dt."""
+        tau = 1.0 / (2.0 * math.pi * max(cutoff, 1e-6))
+        return 1.0 / (1.0 + tau / max(dt, 1e-6))
+
+    def reset(self) -> None:
+        self._value = None
+        self._previous = None
+        self._speed = 0.0
+        self._time = None
+
+    def filter(self, value: float, t: float) -> float:
+        value = float(value)
+        if self._value is None or self._time is None or self._previous is None:
+            self._value = value
+            self._previous = value
+            self._time = float(t)
+            return self._value
+        dt = float(t) - self._time
+        if dt <= 0.0:
+            return self._value  # non-monotonic clock: hold the last output
+        self._time = float(t)
+        raw_speed = (value - self._previous) / dt
+        self._previous = value
+        a_derivative = self._alpha(self.d_cutoff, dt)
+        self._speed = a_derivative * raw_speed + (1.0 - a_derivative) * self._speed
+        cutoff = self.min_cutoff + self.beta * abs(self._speed)
+        a = self._alpha(cutoff, dt)
+        self._value = a * value + (1.0 - a) * self._value
+        return self._value
+
+
 class ScreenMapper:
     """Maps the gaze feature vector onto pixel coordinates on a screen.
 
     Responsibilities: model fitting/loading, feature->screen regression, outlier
-    rejection and configurable EMA smoothing.  When no calibration exists the
+    rejection and EMA or adaptive 1-euro smoothing.  When no calibration exists the
     legacy raw-gain mapping around the screen centre is used.
     """
 
@@ -1441,6 +1593,15 @@ class ScreenMapper:
         self._baseline: Optional[Tuple[float, float]] = None
         self._warm_sum = np.zeros(2, dtype=np.float64)
         self._warm_n = 0
+        # eye-to-camera distance the mapping was calibrated at; when set,
+        # live samples are compensated for leaning toward/away from the camera
+        self.reference_distance_cm: Optional[float] = None
+        self._euro_x = OneEuroFilter(
+            self.config.oneeuro_min_cutoff, self.config.oneeuro_beta, self.config.oneeuro_d_cutoff
+        )
+        self._euro_y = OneEuroFilter(
+            self.config.oneeuro_min_cutoff, self.config.oneeuro_beta, self.config.oneeuro_d_cutoff
+        )
         self.stats: Dict[str, int] = {
             "accepted": 0,
             "rejected_low_confidence": 0,
@@ -1473,6 +1634,19 @@ class ScreenMapper:
         self._warm_sum[:] = 0.0
         self._warm_n = 0
         self._smoothed = None
+        self._euro_x.reset()
+        self._euro_y.reset()
+
+    def set_reference_distance(self, distance_cm: Optional[float]) -> None:
+        """Record the eye-to-camera distance this mapping is calibrated for."""
+        if distance_cm is None:
+            return
+        try:
+            value = float(distance_cm)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(value) and EYE_DISTANCE_MIN_CM <= value <= EYE_DISTANCE_MAX_CM:
+            self.reference_distance_cm = value
 
     def _update_baseline(self, gx: float, gy: float) -> Tuple[float, float]:
         if not auto_center_safe(self.auto_center, self.calibrated):
@@ -1503,6 +1677,13 @@ class ScreenMapper:
                 LOGGER.warning("calibration file screen size %dx%d does not match %dx%d",
                                width, height, self.width, self.height)
                 return
+            if "reference_distance_cm" in keys:
+                try:
+                    ref = float(np.asarray(data["reference_distance_cm"]).item())
+                except (TypeError, ValueError):
+                    ref = float("nan")
+                if math.isfinite(ref) and EYE_DISTANCE_MIN_CM <= ref <= EYE_DISTANCE_MAX_CM:
+                    self.reference_distance_cm = ref
             if "model" in keys:
                 name = str(np.asarray(data["model"]).item())
                 model = build_mapping_model(name, self.config)
@@ -1541,6 +1722,8 @@ class ScreenMapper:
         if self.samples:
             payload["samples"] = np.array([s.features for s in self.samples], dtype=np.float32)
             payload["targets"] = np.array([s.target for s in self.samples], dtype=np.float32)
+        if self.reference_distance_cm is not None:
+            payload["reference_distance_cm"] = np.array(float(self.reference_distance_cm))
         payload.update(self.model.params())
         np.savez(self.path, **payload)
         return self.path
@@ -1574,7 +1757,12 @@ class ScreenMapper:
             return None
         return np.vstack(features), np.array(targets, dtype=np.float64)
 
-    def fit(self, samples: Sequence, model_name: Optional[str] = None) -> bool:
+    def fit(
+        self,
+        samples: Sequence,
+        model_name: Optional[str] = None,
+        reference_distance_cm: Optional[float] = None,
+    ) -> bool:
         """Fit the selected mapping model to Features -> Screen Coordinate samples."""
         coerced = self._coerce_samples(samples)
         if coerced is None:
@@ -1598,9 +1786,12 @@ class ScreenMapper:
         self.samples = [
             MappingSample(f, (float(t[0]), float(t[1]))) for f, t in zip(x, y)
         ]
+        self.set_reference_distance(reference_distance_cm)
         self._smoothed = None
         self._last_raw = None
         self._last_time = None
+        self._euro_x.reset()
+        self._euro_y.reset()
         try:
             self.save()
         except Exception as exc:
@@ -1614,6 +1805,8 @@ class ScreenMapper:
         self._smoothed = None
         self._last_raw = None
         self._last_time = None
+        self._euro_x.reset()
+        self._euro_y.reset()
         self.stats = {key: 0 for key in self.stats}
         if os.path.exists(self.path):
             try:
@@ -1630,11 +1823,19 @@ class ScreenMapper:
         gaze: Optional[Tuple[float, float]],
         features: Optional[np.ndarray] = None,
         confidence: float = 1.0,
+        distance_cm: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
         """Map one gaze sample to screen pixels, or None when it is rejected.
 
         Rejection reasons (outlier rejection, item 17): missing features, low
         confidence, off-screen prediction, implausible jump.
+
+        When ``distance_cm`` is given and a reference distance exists (set at
+        calibration), the offset from the screen centre is scaled by
+        ``distance_cm / reference_distance_cm``: for a fixed gaze angle the
+        spot on the screen moves linearly with the eye-to-screen distance, so
+        leaning toward or away from the camera is compensated instead of
+        showing up as a systematic offset.
         """
         if gaze is None:
             return None
@@ -1671,6 +1872,16 @@ class ScreenMapper:
             x = (0.5 + (gx - base_x) * self.gain) * self.width
             y = (0.5 + (gy - base_y) * self.gain) * self.height
 
+        if distance_cm is not None and self.reference_distance_cm is not None:
+            try:
+                ratio = float(distance_cm) / self.reference_distance_cm
+            except (TypeError, ValueError):
+                ratio = 1.0
+            if math.isfinite(ratio) and abs(ratio - 1.0) > 1e-6:
+                ratio = float(np.clip(ratio, DISTANCE_COMPENSATION_MIN, DISTANCE_COMPENSATION_MAX))
+                x = self.width / 2.0 + (x - self.width / 2.0) * ratio
+                y = self.height / 2.0 + (y - self.height / 2.0) * ratio
+
         x = float(min(max(x, 0.0), self.width - 1))
         y = float(min(max(y, 0.0), self.height - 1))
 
@@ -1694,15 +1905,22 @@ class ScreenMapper:
         self._last_time = now
         self.stats["accepted"] += 1
 
-        # configurable EMA smoothing (does not hardcode the factor)
-        alpha = self.smoothing
-        if self._smoothed is None or alpha >= 1.0:
-            self._smoothed = (x, y)
-        else:
+        # temporal smoothing: adaptive 1 euro filter (little lag while moving,
+        # strong while still) or the configurable fixed-factor EMA
+        if self.config.smoothing_filter == "oneeuro":
             self._smoothed = (
-                alpha * x + (1.0 - alpha) * self._smoothed[0],
-                alpha * y + (1.0 - alpha) * self._smoothed[1],
+                self._euro_x.filter(x, now),
+                self._euro_y.filter(y, now),
             )
+        else:
+            alpha = self.smoothing
+            if self._smoothed is None or alpha >= 1.0:
+                self._smoothed = (x, y)
+            else:
+                self._smoothed = (
+                    alpha * x + (1.0 - alpha) * self._smoothed[0],
+                    alpha * y + (1.0 - alpha) * self._smoothed[1],
+                )
         return self._smoothed
 
 
