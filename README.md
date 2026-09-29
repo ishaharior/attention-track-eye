@@ -69,8 +69,11 @@ Pupil position alone is never treated as the direct gaze direction.
 | `phase1_eye_tracking.py` | 210 | Phase 1 — eye ROI, pupil/iris detection, head pose, feature vector, eye fusion (live webcam UI) |
 | `phase2_coordinate_mapping.py` | 890 | Phase 2 — calibration, mapping models, outlier rejection, EMA, validation mode, evaluation reports |
 | `phase3_attention_heatmap.py` | 713 | Phase 3 — fixation/saccade detection, weighted accumulation, time decay, blur, rendering, export |
-| `test_gaze_pipeline.py` | 829 | Offline test suite (52 tests, no webcam required) |
-| `process_explainer.html` | 717 | Browser documentation + interactive conceptual simulation |
+| `test_gaze_pipeline.py` | 829 | Offline pipeline test suite (52 tests, no webcam required) |
+| `test_webapp.py` | 233 | Headless browser-interface test suite (9 tests, no webcam required) |
+| `web_app.py` | 531 | Flask server: live browser sessions, calibration, frame loop, heatmap report |
+| `web_interface.html` | 688 | Browser UI: document upload, webcam capture, calibration, live gaze dot, report |
+| `process_explainer.html` | 1153 | Browser documentation + interactive conceptual simulation |
 
 Three-phase organization is preserved: **Phase 1** eye/head-pose feature extraction,
 **Phase 2** coordinate mapping, **Phase 3** gaze-density heatmap.
@@ -355,14 +358,38 @@ CLI flags mirror these (`--points`, `--samples-per-point`, `--ema-alpha`, `--map
 ## 9. Running
 
 ```bash
-pip install -r requirements.txt        # mediapipe, opencv-contrib-python, numpy
+pip install -r requirements.txt        # mediapipe, opencv-contrib-python, numpy, flask
 
 python phase1_eye_tracking.py                                   # eye + head-pose features
 python phase2_coordinate_mapping.py --screen 1920x1080          # calibration + mapping
 python phase2_coordinate_mapping.py --validate --compare-models # validation report
 python phase3_attention_heatmap.py --background camera          # gaze-density heatmap
-python -m unittest -v test_gaze_pipeline                        # offline test suite (52 tests)
+python web_app.py                                               # live browser demo (webcam)
+python -m unittest discover -p "test_*.py"                      # offline test suite (61 tests)
 ```
+
+### Live browser demo (webcam required)
+
+```bash
+python web_app.py            # then open http://127.0.0.1:5000
+```
+
+1. **Upload** a PNG/JPG document (PDF works too — PDF.js is loaded from a CDN, all
+   pages are stacked into one image; PNG/JPG need no internet).
+2. **Start camera & tracking** and allow webcam access. Choose either a 5- or 9-point
+   **calibration** (follow the dot with your eyes only, head still) or skip it for a
+   rough centre mapping. Options also cover the mapping model and time decay.
+3. **Watch** the live gaze dot move on the document; the sidebar shows confidence,
+   fps, face detection and the calibration residual.
+4. **Finish — build heatmap report** overlays the accumulated, confidence-weighted
+   gaze density on the uploaded document at its natural scale — TURBO colormap,
+   blue = low density, red = high density — plus session statistics (fixations,
+   saccades, durations, calibration residual, heatmap parameters) and PNG/JSON export.
+
+Everything runs locally: video frames travel only from your browser to
+`127.0.0.1`. The demo reuses the exact pipeline from the CLIs (`EyeTracker` →
+`ScreenCalibrator`/`ScreenMapper` → `AttentionHeatmap` → `EventDetector`) — it is a
+real test of the implemented system, not a simulation. `--host` / `--port` change the bind.
 
 Common hotkeys — Phase 1: `i` pupil mode, `m` mesh, `h` HUD, `f` features, `s` snapshot.
 Phase 2: `c` calibrate, `SPACE` capture point, `v` validation, `m` mapping model,
@@ -373,9 +400,9 @@ Phase 2: `c` calibrate, `SPACE` capture point, `v` validation, `m` mapping model
 
 ## 10. Validation performed on this codebase
 
-Run with `python -m unittest -v test_gaze_pipeline` (offline, deterministic):
+Run with `python -m unittest discover -p "test_*.py"` (offline, deterministic):
 
-- **52 tests pass**, `pyflakes` is clean on all Python files.
+- **61 tests pass** (52 pipeline + 9 web interface), `pyflakes` is clean on all Python files.
 - Covered: configuration validation, feature-vector construction, head-pose recovery of
   known yaw/pitch/roll from projected landmarks, landmark/head-pose confidence
   behaviour, confidence breakdown, confidence-weighted fusion and its rejection path,
@@ -389,11 +416,19 @@ Run with `python -m unittest -v test_gaze_pipeline` (offline, deterministic):
   end-to-end Phase 1 run of the real `EyeTracker.process` (stubbed MediaPipe landmarks)
   that checks eye extraction, feature vector, head-pose recovery and all five
   confidence components.
-- All three CLIs start and parse arguments (`--help` verified).
+- Web interface (`test_webapp.py`): session/frame/finish/reset endpoint contracts and
+  error paths, the real MediaPipe frame path on face-less frames, calibration
+  stabilization → fit → residual reporting, report generation with the real
+  `AttentionHeatmap` render (hot cluster red-dominant, weak cluster weaker, blur does
+  not leak into untouched regions), both finish modes (cumulative and end-anchored
+  time decay), and the blue→red colormap endpoints.
+- All three CLIs start and parse arguments (`--help` verified); `web_app.py` was
+  started and served `/`, `/api/health` and expected 409s correctly.
 
 **Not run here (no webcam attached in the development environment):** live camera
 capture, real-face landmark/pupil behaviour, on-screen calibration sessions, live
-validation sessions, and live heatmap accumulation. Those paths must be exercised on a
+validation sessions, live heatmap accumulation, and an end-to-end browser session
+(upload → camera → calibration → finish). Those paths must be exercised on a
 machine with a camera; the reports they produce are the only valid basis for accuracy
 claims.
 

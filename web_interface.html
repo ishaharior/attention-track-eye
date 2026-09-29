@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attention Track Eye — Live Webcam Gaze Heatmap</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+</script>
+<style>
+  :root {
+    --bg: #0e1114; --panel: #151a20; --line: #232a33; --text: #dfe6ee;
+    --dim: #8b97a5; --accent: #4da3ff; --warn: #f0a53a; --ok: #46d18a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--dim); font-size: 12px; margin-left: 8px; }
+  .chip {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    background: #202730; border: 1px solid var(--line); color: var(--dim);
+  }
+  .chip.live { color: var(--ok); border-color: #2c5c44; }
+  .chip.warn { color: var(--warn); border-color: #5c4a2c; }
+  main {
+    display: grid; grid-template-columns: 1fr 330px; gap: 12px;
+    padding: 12px; height: calc(100vh - 53px);
+  }
+  #stage {
+    position: relative; background: #12161b; border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; min-width: 0;
+  }
+  #dropzone {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; text-align: center;
+    border: 2px dashed #2b3441; border-radius: 10px; margin: 14px;
+  }
+  #dropzone.drag { border-color: var(--accent); background: #141b24; }
+  .drop-inner .big { font-size: 18px; margin: 6px 0; }
+  .hint { color: var(--dim); font-size: 12px; }
+  .hint.warn { color: var(--warn); }
+  #docArea {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; padding: 16px;
+  }
+  #docBox { position: relative; line-height: 0; box-shadow: 0 8px 30px rgba(0,0,0,.55); }
+  #docCanvas { display: block; background: #fff; }
+  #overlayCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  #calibHint {
+    position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: rgba(14,17,20,.9); border: 1px solid var(--line);
+    padding: 7px 14px; border-radius: 999px; font-size: 13px; white-space: nowrap;
+  }
+  #reportArea {
+    position: absolute; inset: 0; overflow: auto; padding: 14px;
+  }
+  .report-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .report-head h2 { font-size: 15px; margin: 0 0 8px; }
+  .colorbar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dim); }
+  .colorbar .grad {
+    width: 220px; height: 13px; border-radius: 7px; border: 1px solid var(--line);
+    background: linear-gradient(to right, #30123b, #455ccf, #3d9efe, #18d9c8, #4ef97d,
+      #a9fb39, #e7d739, #fe9b2d, #eb500e, #b91e02, #7a0403);
+  }
+  #reportImg { max-width: 100%; margin-top: 10px; border-radius: 6px; background: #fff; }
+  #sidebar { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .panel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  .panel label { display: block; margin: 8px 0 4px; font-size: 13px; color: var(--dim); }
+  select {
+    width: 100%; margin-top: 4px; padding: 7px 8px; border-radius: 7px;
+    background: #10151a; color: var(--text); border: 1px solid var(--line);
+  }
+  .btn {
+    display: block; width: 100%; margin-top: 8px; padding: 9px 10px;
+    border-radius: 8px; border: 1px solid var(--line); background: #1b222b;
+    color: var(--text); font-size: 14px; cursor: pointer;
+  }
+  .btn:hover:not(:disabled) { border-color: #35414f; background: #202934; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: #1c4a7c; border-color: #2b6cb0; }
+  .btn.primary:hover:not(:disabled) { background: #21588f; }
+  .btn.warn { background: #6e4a13; border-color: #9c6c1f; }
+  .btn.warn:hover:not(:disabled) { background: #7d5517; }
+  .file-label { display: inline-block; width: auto; padding: 9px 18px; }
+  .file-label .btn, .btn.file { display: inline-block; width: auto; }
+  #cam {
+    width: 100%; border-radius: 7px; background: #000; transform: scaleX(-1);
+    aspect-ratio: 4 / 3; object-fit: cover;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .row .bar { flex: 1; height: 8px; background: #10151a; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
+  .row .bar > div { height: 100%; width: 0%; background: var(--ok); transition: width .15s; }
+  .row.kv { justify-content: space-between; }
+  .row.kv span:last-child { color: var(--text); font-variant-numeric: tabular-nums; }
+  #statsTable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  #statsTable td { padding: 4px 2px; border-bottom: 1px solid #1d242d; vertical-align: top; }
+  #statsTable td:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  #statsTable td:first-child { color: var(--dim); }
+  #toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: #2a1d10; color: #ffd9a0; border: 1px solid #6e4a13;
+    padding: 10px 16px; border-radius: 8px; max-width: 80%; z-index: 50; font-size: 13px;
+  }
+  #toast.ok { background: #12271d; color: #a9edcc; border-color: #2c5c44; }
+  .checks { margin-top: 8px; font-size: 12.5px; color: var(--dim); display: flex; gap: 8px; align-items: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <div><h1>Attention Track Eye<span class="sub">live webcam gaze-density heatmap — local processing</span></h1></div>
+  <span id="statusChip" class="chip">no document</span>
+</header>
+
+<main>
+  <section id="stage">
+    <div id="dropzone">
+      <div class="drop-inner">
+        <p class="big">Drop a document here</p>
+        <p>or</p>
+        <label class="btn file">Choose PNG / JPG / PDF
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" hidden>
+        </label>
+        <p class="hint">Runs entirely on this machine — no frames leave your computer.</p>
+        <p class="hint warn" id="pdfNote" hidden>PDF.js could not load (offline?). PDF uploads are disabled; PNG/JPG still work.</p>
+      </div>
+    </div>
+
+    <div id="docArea" hidden>
+      <div id="docBox">
+        <canvas id="docCanvas"></canvas>
+        <canvas id="overlayCanvas"></canvas>
+      </div>
+      <div id="calibHint" hidden></div>
+    </div>
+
+    <div id="reportArea" hidden>
+      <div class="report-head">
+        <h2>Gaze-density heatmap on the uploaded document</h2>
+        <div class="colorbar"><span>low density</span><div class="grad"></div><span>high density</span></div>
+      </div>
+      <img id="reportImg" alt="gaze-density heatmap over the uploaded document">
+      <p class="hint">Blue = low gaze density, red = high gaze density (cv2 TURBO).
+        Density is confidence-weighted dwell over the session; documents are shown at their natural scale.</p>
+    </div>
+  </section>
+
+  <aside id="sidebar">
+    <div class="panel" id="docPanel" hidden>
+      <h3>Document</h3>
+      <div class="hint" id="docInfo">—</div>
+      <button class="btn" id="replaceBtn">Replace document</button>
+    </div>
+
+    <div class="panel" id="optionsPanel" hidden>
+      <h3>Options</h3>
+      <label>Calibration
+        <select id="pointsSel">
+          <option value="5">5 points — centre + corners</option>
+          <option value="9">9 points — grid</option>
+          <option value="0">None — rough centre mapping</option>
+        </select>
+      </label>
+      <label>Mapping model
+        <select id="modelSel">
+          <option value="affine">affine</option>
+          <option value="polynomial">polynomial</option>
+          <option value="mlp">mlp (small)</option>
+        </select>
+      </label>
+      <div class="checks">
+        <input type="checkbox" id="decayChk">
+        <label for="decayChk" style="margin:0">Apply time decay &tau;&nbsp;=&nbsp;5&nbsp;s (emphasise recent gaze)</label>
+      </div>
+      <p class="hint">Calibration: sit ~60 cm away, keep your head still, and follow the dot with your eyes only.</p>
+    </div>
+
+    <div class="panel" id="livePanel" hidden>
+      <h3>Camera</h3>
+      <video id="cam" autoplay playsinline muted></video>
+      <div class="row"><span>confidence</span><div class="bar"><div id="confBar"></div></div><span id="confVal">–</span></div>
+      <div class="row"><span>calibration</span><div class="bar"><div id="calibBar"></div></div><span id="calibVal">–</span></div>
+      <div class="row kv"><span>gaze fps</span><span id="fpsVal">–</span></div>
+      <div class="row kv"><span>inference</span><span id="inferVal">–</span></div>
+      <div class="row kv"><span>face</span><span id="faceVal">–</span></div>
+      <div class="row kv"><span>calibration residual</span><span id="residVal">–</span></div>
+    </div>
+
+    <div class="panel" id="actionsPanel">
+      <button class="btn primary" id="startBtn" disabled>Start camera &amp; tracking</button>
+      <button class="btn warn" id="finishBtn" hidden>Finish — build heatmap report</button>
+      <button class="btn" id="resetBtn" hidden>New run</button>
+      <button class="btn" id="stopBtn" hidden>Stop camera</button>
+    </div>
+
+    <div class="panel" id="statsPanel" hidden>
+      <h3>Report</h3>
+      <table id="statsTable"></table>
+      <button class="btn" id="pngBtn">Download heatmap PNG</button>
+      <button class="btn" id="jsonBtn">Download report JSON</button>
+    </div>
+  </aside>
+</main>
+
+<div id="toast" hidden></div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- elements
+const $ = (id) => document.getElementById(id);
+const els = {
+  statusChip: $("statusChip"), dropzone: $("dropzone"), fileInput: $("fileInput"),
+  pdfNote: $("pdfNote"), docArea: $("docArea"), docBox: $("docBox"),
+  docCanvas: $("docCanvas"), overlay: $("overlayCanvas"), calibHint: $("calibHint"),
+  reportArea: $("reportArea"), reportImg: $("reportImg"),
+  docPanel: $("docPanel"), docInfo: $("docInfo"), replaceBtn: $("replaceBtn"),
+  optionsPanel: $("optionsPanel"), pointsSel: $("pointsSel"), modelSel: $("modelSel"),
+  decayChk: $("decayChk"), livePanel: $("livePanel"), cam: $("cam"),
+  confBar: $("confBar"), confVal: $("confVal"), calibBar: $("calibBar"),
+  calibVal: $("calibVal"), fpsVal: $("fpsVal"), inferVal: $("inferVal"),
+  faceVal: $("faceVal"), residVal: $("residVal"),
+  startBtn: $("startBtn"), finishBtn: $("finishBtn"), resetBtn: $("resetBtn"),
+  stopBtn: $("stopBtn"), statsPanel: $("statsPanel"), statsTable: $("statsTable"),
+  pngBtn: $("pngBtn"), jsonBtn: $("jsonBtn"), toast: $("toast"),
+};
+
+const octx = els.overlay.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+
+// ---------------------------------------------------------------- state
+let state = "idle";          // idle | ready | starting | calibrating | tracking | failed | report
+let hasDoc = false;
+let stream = null;
+let capture = null;          // offscreen canvas for webcam frames
+let loopTimer = null;
+let inFlight = false;
+let sessionRect = null;      // document display rect sent to the server
+let lastGaze = null;         // {x, y} in rect-relative CSS px
+let trail = [];
+let liveTarget = null;       // calibration target, rect-relative px
+let lastReport = null;
+let fpsTimes = [];
+let busy = false;
+
+// ---------------------------------------------------------------- helpers
+function toast(message, ok) {
+  els.toast.textContent = message;
+  els.toast.className = ok ? "ok" : "";
+  els.toast.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { els.toast.hidden = true; }, 5000);
+}
+
+function pct(v) { return (v * 100).toFixed(0) + "%"; }
+
+function setState(next) {
+  state = next;
+  els.dropzone.hidden = next !== "idle";
+  els.docArea.hidden = !(next === "ready" || next === "starting" || next === "calibrating" ||
+    next === "tracking" || next === "failed");
+  els.reportArea.hidden = next !== "report";
+  els.docPanel.hidden = !hasDoc;
+  els.optionsPanel.hidden = !(next === "ready" || next === "calibrating" || next === "tracking");
+  els.livePanel.hidden = !stream || next === "report" || next === "idle";
+  els.startBtn.hidden = next !== "ready";
+  els.startBtn.disabled = next !== "ready" || busy;
+  els.finishBtn.hidden = !(next === "calibrating" || next === "tracking");
+  els.resetBtn.hidden = !(next === "report" || next === "failed");
+  els.stopBtn.hidden = !stream;
+  els.statsPanel.hidden = next !== "report";
+  els.calibHint.hidden = next !== "calibrating";
+
+  const chips = {
+    idle: ["no document", ""], ready: ["document ready", ""], starting: ["starting…", "warn"],
+    calibrating: ["calibrating", "warn"], tracking: ["tracking live", "live"],
+    failed: ["calibration failed", "warn"], report: ["report", "live"],
+  };
+  const [text, cls] = chips[next] || ["", ""];
+  els.statusChip.textContent = text;
+  els.statusChip.className = "chip " + cls;
+}
+
+async function post(url, payload) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (res.status + " request failed"));
+  return data;
+}
+
+// ---------------------------------------------------------------- document
+async function handleFile(file) {
+  if (!file) return;
+  hardReset(false);
+  try {
+    let source, pages = null;
+    if (file.type === "application/pdf" || /\.pdf$/i.test(file.name)) {
+      const rendered = await renderPdf(file);
+      source = rendered.canvas; pages = rendered.pages;
+    } else {
+      const img = await loadImage(file);
+      source = img;
+    }
+    setDocument(source);
+    els.docInfo.textContent =
+      file.name + " — " + els.docCanvas.width + "\u00d7" + els.docCanvas.height +
+      (pages ? " px · " + pages + " page" + (pages > 1 ? "s stacked" : "") : " px");
+    hasDoc = true;
+    setState("ready");
+    fitDoc();
+  } catch (err) {
+    toast(err.message || "could not open the file");
+    if (!hasDoc) setState("idle");
+  }
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("could not decode that image")); };
+    img.src = url;
+  });
+}
+
+async function renderPdf(file) {
+  if (typeof window.pdfjsLib === "undefined") {
+    els.pdfNote.hidden = false;
+    throw new Error("PDF.js is unavailable (no internet connection?) — use PNG/JPG instead");
+  }
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const pages = [];
+  let totalH = 0, maxW = 0;
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale: 1 });
+    pages.push(page);
+    totalH += vp.height;
+    maxW = Math.max(maxW, vp.width);
+  }
+  // stack all pages into one canvas, capped so memory and the heatmap stay sane
+  const scale = Math.min(1.5, 2400 / maxW, 6000 / totalH);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(Math.round(maxW * scale), 1);
+  canvas.height = Math.max(Math.round(totalH * scale), 1);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  let y = 0;
+  for (const page of pages) {
+    const vp = page.getViewport({ scale });
+    const tile = document.createElement("canvas");
+    tile.width = Math.round(vp.width);
+    tile.height = Math.round(vp.height);
+    await page.render({ canvasContext: tile.getContext("2d"), viewport: vp }).promise;
+    ctx.drawImage(tile, 0, Math.round(y));
+    y += vp.height;
+  }
+  return { canvas, pages: pdf.numPages };
+}
+
+function setDocument(source) {
+  const w0 = source.naturalWidth || source.width;
+  const h0 = source.naturalHeight || source.height;
+  const shrink = Math.min(1, 2400 / Math.max(w0, h0));
+  els.docCanvas.width = Math.max(Math.round(w0 * shrink), 1);
+  els.docCanvas.height = Math.max(Math.round(h0 * shrink), 1);
+  const ctx = els.docCanvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, els.docCanvas.width, els.docCanvas.height);
+  ctx.drawImage(source, 0, 0, els.docCanvas.width, els.docCanvas.height);
+}
+
+function fitDoc() {
+  if (!hasDoc || (state !== "ready" && state !== "idle" && state !== "failed")) return;
+  const area = els.docArea.getBoundingClientRect();
+  const availW = Math.max(area.width - 32, 50);
+  const availH = Math.max(area.height - 32, 50);
+  const scale = Math.min(availW / els.docCanvas.width, availH / els.docCanvas.height);
+  els.docCanvas.style.width = Math.round(els.docCanvas.width * scale) + "px";
+  els.docCanvas.style.height = Math.round(els.docCanvas.height * scale) + "px";
+  const w = els.docCanvas.clientWidth, h = els.docCanvas.clientHeight;
+  els.overlay.width = Math.round(w * dpr);
+  els.overlay.height = Math.round(h * dpr);
+}
+
+// ---------------------------------------------------------------- camera
+async function startCamera() {
+  if (stream) return;
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+    audio: false,
+  });
+  els.cam.srcObject = stream;
+  await els.cam.play().catch(() => {});
+  if (!els.cam.videoWidth) {
+    await new Promise((resolve) => { els.cam.onloadedmetadata = resolve; });
+  }
+  capture = document.createElement("canvas");
+  capture.width = els.cam.videoWidth || 640;
+  capture.height = els.cam.videoHeight || 480;
+}
+
+function stopCamera() {
+  stopLoop();
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  els.cam.srcObject = null;
+  if (state === "calibrating" || state === "tracking") hardReset(false);
+  else setState(hasDoc ? "ready" : "idle");
+}
+
+// ---------------------------------------------------------------- session
+async function startSession() {
+  if (busy) return;
+  busy = true;
+  const rect = els.docBox.getBoundingClientRect();   // capture while layout is stable
+  setState("starting");
+  try {
+    await startCamera();
+    sessionRect = rect;
+    if (sessionRect.width < 80 || sessionRect.height < 80) {
+      throw new Error("the document display is too small — enlarge the window");
+    }
+    const payload = {
+      image: els.docCanvas.toDataURL("image/jpeg", 0.92),
+      rect: { x: sessionRect.x, y: sessionRect.y, w: sessionRect.width, h: sessionRect.height },
+      points: parseInt(els.pointsSel.value, 10),
+      model: els.modelSel.value,
+      calibration: parseInt(els.pointsSel.value, 10) > 0,
+    };
+    const data = await post("/api/session", payload);
+    lastGaze = null; trail = []; liveTarget = null; fpsTimes = [];
+    els.residVal.textContent = "–";
+    setState(data.mode === "calibrating" ? "calibrating" : "tracking");
+    startLoop();
+  } catch (err) {
+    toast(err.message);
+    setState("ready");
+  } finally {
+    busy = false;
+    setState(state);   // refresh enabled/disabled flags
+  }
+}
+
+// ---------------------------------------------------------------- frame loop
+function startLoop() {
+  if (loopTimer) return;
+  loopTimer = setInterval(tick, 80);   // ~12.5 frames/s keeps calibration moving
+}
+
+function stopLoop() {
+  if (loopTimer) { clearInterval(loopTimer); loopTimer = null; }
+  inFlight = false;
+}
+
+async function tick() {
+  if (inFlight || !stream || (state !== "calibrating" && state !== "tracking")) return;
+  inFlight = true;
+  try {
+    const ctx = capture.getContext("2d");
+    ctx.drawImage(els.cam, 0, 0, capture.width, capture.height);
+    const data = await post("/api/frame", {
+      image: capture.toDataURL("image/jpeg", 0.7),
+      t_ms: performance.now(),
+    });
+    handleFrame(data);
+  } catch (err) {
+    toast(err.message);
+    stopLoop();
+    setState("failed");
+  } finally {
+    inFlight = false;
+  }
+}
+
+function handleFrame(data) {
+  fpsTimes.push(Date.now());
+  const cutoff = Date.now() - 1000;
+  fpsTimes = fpsTimes.filter((t) => t > cutoff);
+  els.fpsVal.textContent = String(fpsTimes.length);
+
+  if (data.face) {
+    els.faceVal.textContent = "detected";
+    els.faceVal.style.color = "var(--ok)";
+  } else {
+    els.faceVal.textContent = "not found";
+    els.faceVal.style.color = "var(--warn)";
+  }
+  const conf = data.confidence || 0;
+  els.confBar.style.width = pct(conf);
+  els.confBar.style.background = conf > 0.6 ? "var(--ok)" : conf > 0.35 ? "var(--warn)" : "#d23105";
+  els.confVal.textContent = conf.toFixed(2);
+  els.inferVal.textContent = (data.inference_ms || 0).toFixed(0) + " ms";
+
+  if (data.mode === "calibration_failed") {
+    stopLoop();
+    toast((data.calibration && data.calibration.error) || "calibration failed");
+    setState("failed");
+    return;
+  }
+  if (state === "calibrating" && data.mode === "tracking") {
+    setState("tracking");
+    els.calibBar.style.width = "100%";
+    els.calibVal.textContent = "done";
+  }
+  if (data.calibration) {
+    els.calibBar.style.width = pct(data.calibration.progress || 0);
+    els.calibVal.textContent = Math.min(data.calibration.index + 1, data.calibration.total) +
+      "/" + data.calibration.total;
+    if (state === "calibrating") {
+      liveTarget = data.calibration.target;
+      els.calibHint.textContent = "Look at the dot — target " +
+        Math.min(data.calibration.index + 1, data.calibration.total) +
+        " of " + data.calibration.total;
+      if (data.calibration.residual) {
+        els.residVal.textContent = data.calibration.residual.mean_px.toFixed(1) + " px mean";
+      }
+    }
+  }
+  if (data.mode === "tracking") liveTarget = null;
+
+  if (data.gaze) {
+    lastGaze = { x: data.gaze.x, y: data.gaze.y };
+    trail.push({ x: lastGaze.x, y: lastGaze.y });
+    if (trail.length > 50) trail.shift();
+  }
+}
+
+// ---------------------------------------------------------------- overlay
+function drawOverlay() {
+  requestAnimationFrame(drawOverlay);
+  if (!els.overlay.width) return;
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  octx.clearRect(0, 0, els.overlay.width / dpr, els.overlay.height / dpr);
+
+  if (state === "calibrating" && liveTarget) {
+    const { x, y } = liveTarget;
+    const p = parseFloat(els.calibBar.style.width) / 100 || 0;
+    octx.save();
+    octx.strokeStyle = "rgba(77,163,255,.95)";
+    octx.lineWidth = 2;
+    octx.beginPath(); octx.arc(x, y, 16, 0, Math.PI * 2); octx.stroke();
+    octx.beginPath();
+    octx.arc(x, y, 16, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2);
+    octx.strokeStyle = "#46d18a"; octx.lineWidth = 4; octx.stroke();
+    octx.fillStyle = "#4da3ff";
+    octx.beginPath(); octx.arc(x, y, 5, 0, Math.PI * 2); octx.fill();
+    octx.restore();
+  }
+
+  if (lastGaze && state === "tracking") {
+    octx.save();
+    for (let i = 1; i < trail.length; i++) {
+      const a = i / trail.length;
+      octx.strokeStyle = "rgba(255,255,255," + (a * 0.35).toFixed(2) + ")";
+      octx.lineWidth = 2;
+      octx.beginPath();
+      octx.moveTo(trail[i - 1].x, trail[i - 1].y);
+      octx.lineTo(trail[i].x, trail[i].y);
+      octx.stroke();
+    }
+    const conf = parseFloat(els.confVal.textContent) || 0;
+    const hue = Math.round(120 * conf);   // red = unreliable, green = reliable
+    octx.fillStyle = "hsla(" + hue + ",90%,55%,.25)";
+    octx.beginPath(); octx.arc(lastGaze.x, lastGaze.y, 17, 0, Math.PI * 2); octx.fill();
+    octx.strokeStyle = "hsl(" + hue + ",90%,55%)";
+    octx.lineWidth = 2.5;
+    octx.beginPath(); octx.arc(lastGaze.x, lastGaze.y, 9, 0, Math.PI * 2); octx.stroke();
+    octx.fillStyle = "#fff";
+    octx.beginPath(); octx.arc(lastGaze.x, lastGaze.y, 2.5, 0, Math.PI * 2); octx.fill();
+    octx.restore();
+  }
+}
+requestAnimationFrame(drawOverlay);
+
+// ---------------------------------------------------------------- finish / report
+async function finishSession() {
+  stopLoop();
+  try {
+    const data = await post("/api/finish", { decay: els.decayChk.checked });
+    lastReport = data;
+    els.reportImg.src = data.heatmap_png;
+    fillStats(data.stats);
+    setState("report");
+    toast("Heatmap report ready", true);
+  } catch (err) {
+    toast(err.message);
+    if (!loopTimer && stream) startLoop();   // keep tracking if the report failed
+  }
+}
+
+function fillStats(s) {
+  const calib = s.calibration
+    ? s.calibration.mean_px.toFixed(1) + " px mean · " +
+      s.calibration.median_px.toFixed(1) + " px median (" + s.calibration.sample_count + " samples)"
+    : "none — rough centre mapping";
+  const rows = [
+    ["Duration", s.duration_s + " s"],
+    ["Frames processed", s.frames],
+    ["Face visible", pct(s.face_rate)],
+    ["Mean confidence", s.mean_confidence.toFixed(3)],
+    ["Gaze samples", s.gaze_samples],
+    ["Heatmap points", s.heatmap_points],
+    ["Rejected (low confidence)", s.rejected_low_confidence],
+    ["Fixations (I-DT)", s.fixations],
+    ["Saccades", s.saccades],
+    ["Mean fixation duration", s.mean_fixation_ms + " ms"],
+    ["Mean inference time", s.mean_inference_ms + " ms"],
+    ["Calibration residual", calib],
+    ["Mapping model", s.mapping.model],
+    ["Valid sample rate", pct(s.mapping.valid_sample_rate)],
+    ["Heatmap cell size", s.heatmap.cell_px + " px"],
+    ["Gaussian sigma", s.heatmap.sigma_px + " px"],
+    ["Gamma / alpha", s.heatmap.gamma + " / " + s.heatmap.alpha],
+    ["Time decay", s.heatmap.decay_tau_s
+      ? "\u03c4 = " + s.heatmap.decay_tau_s + " s (recent-weighted)"
+      : "off — full session"],
+    ["Colormap", s.heatmap.colormap],
+  ];
+  els.statsTable.innerHTML = rows
+    .map((r) => "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>")
+    .join("");
+}
+
+function download(href, name) {
+  const a = document.createElement("a");
+  a.href = href; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// ---------------------------------------------------------------- reset
+async function hardReset(backToIdle) {
+  stopLoop();
+  try { await post("/api/reset"); } catch (err) { /* no session is fine */ }
+  lastGaze = null; trail = []; liveTarget = null; lastReport = null;
+  els.reportImg.removeAttribute("src");
+  els.confBar.style.width = "0%"; els.calibBar.style.width = "0%";
+  els.confVal.textContent = "–"; els.calibVal.textContent = "–";
+  els.fpsVal.textContent = "–"; els.inferVal.textContent = "–";
+  els.faceVal.textContent = "–"; els.residVal.textContent = "–";
+  setState(backToIdle || !hasDoc ? "idle" : "ready");
+  if (hasDoc && !backToIdle) fitDoc();
+}
+
+// ---------------------------------------------------------------- wiring
+els.fileInput.addEventListener("change", (e) => handleFile(e.target.files[0]));
+["dragover", "dragenter"].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.add("drag"); }));
+["dragleave", "drop"].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.remove("drag"); }));
+els.dropzone.addEventListener("drop", (e) => handleFile(e.dataTransfer.files[0]));
+
+els.startBtn.addEventListener("click", startSession);
+els.finishBtn.addEventListener("click", finishSession);
+els.resetBtn.addEventListener("click", () => hardReset(false));
+els.stopBtn.addEventListener("click", stopCamera);
+els.replaceBtn.addEventListener("click", () => { hardReset(true); els.fileInput.click(); });
+els.pngBtn.addEventListener("click", () => {
+  if (lastReport) download(lastReport.heatmap_png, "gaze_heatmap.png");
+});
+els.jsonBtn.addEventListener("click", () => {
+  if (!lastReport) return;
+  const blob = new Blob([JSON.stringify(lastReport.stats, null, 2)], { type: "application/json" });
+  download(URL.createObjectURL(blob), "gaze_report.json");
+});
+
+window.addEventListener("resize", () => { if (state === "ready") fitDoc(); });
+
+if (typeof window.pdfjsLib === "undefined") els.pdfNote.hidden = false;
+setState("idle");
+</script>
+</body>
+</html>
