@@ -100,10 +100,19 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("gaze-density heatmap", body)
         self.assertIn("Finish — build heatmap report", body)
         self.assertIn("blue = low gaze density", body.lower())
+        # CSS must not defeat the hidden attribute or toggled panels stay visible
+        self.assertIn("[hidden] { display: none !important; }", body)
 
     def test_session_rejects_missing_image(self):
         res = self.client.post("/api/session", json={})
         self.assertEqual(res.status_code, 400)
+
+    def test_session_accepts_points_zero_rough_mode(self):
+        """The UI's "None — rough centre mapping" sends points=0 + calibration=false."""
+        payload = self._session_payload(calibration=False, points=0)
+        res = self.client.post("/api/session", json=payload)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["mode"], "tracking")
 
     def test_session_rejects_bad_points(self):
         payload = self._session_payload(points=7)
@@ -212,6 +221,140 @@ class WebAppTest(unittest.TestCase):
         res = self.client.post("/api/reset", json={})
         self.assertEqual(res.status_code, 200)
         self.assertIsNone(self.client.get("/api/health").get_json()["session"])
+
+
+class GridMappingTest(unittest.TestCase):
+    """Grid view: numbered-digit popups -> mapping refit via /api/grid/finish."""
+
+    def setUp(self):
+        web_app.app.config["TESTING"] = True
+        self.client = web_app.app.test_client()
+        self._clear_session()
+
+    def tearDown(self):
+        self._clear_session()
+
+    @staticmethod
+    def _clear_session():
+        with web_app.STATE_LOCK:
+            if web_app._session is not None:
+                web_app._session.dispose()
+                web_app._session = None
+
+    def _start_tracking(self, calibration=False):
+        payload = WebAppTest._session_payload(calibration=calibration)
+        res = self.client.post("/api/session", json=payload)
+        self.assertEqual(res.status_code, 200)
+
+    @staticmethod
+    def _inject_grid(session, targets, per_target=6, rng=None):
+        """Fill grid_targets/grid_samples as if the client showed the digits."""
+        rng = rng or np.random.default_rng(7)
+        for grid_id, (natural_x, natural_y) in enumerate(targets):
+            session.grid_targets[grid_id] = (float(natural_x), float(natural_y))
+            normalized = (natural_x / session.doc_width, natural_y / session.doc_height)
+            rows = session.grid_samples.setdefault(grid_id, [])
+            for _ in range(per_target):
+                rows.append((synthetic_features(rng, normalized), 0.9))
+
+    def test_frame_accepts_grid_payload_but_gates_on_face(self):
+        self._start_tracking()
+        res = self.client.post("/api/frame", json={
+            "image": png_data_url(blank_frame()),
+            "t_ms": 200.0,
+            "grid": {"active": True, "id": 0, "x": 40, "y": 30, "restart": True},
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn("grid", res.get_json())      # no face -> no samples
+        with web_app.STATE_LOCK:
+            self.assertEqual(web_app._session.grid_samples, {})
+            self.assertEqual(web_app._session.grid_targets, {})
+
+    def test_grid_restart_clears_stale_samples(self):
+        self._start_tracking()
+        with web_app.STATE_LOCK:
+            session = web_app._session
+            self._inject_grid(session, [(40, 30)], per_target=4)
+        res = self.client.post("/api/frame", json={
+            "image": png_data_url(blank_frame()),
+            "t_ms": 300.0,
+            "grid": {"active": True, "id": 0, "x": 40, "y": 30, "restart": True},
+        })
+        self.assertEqual(res.status_code, 200)
+        with web_app.STATE_LOCK:
+            self.assertEqual(web_app._session.grid_samples, {})
+            self.assertEqual(web_app._session.grid_targets, {})
+
+    def test_grid_finish_fits_and_reports_measured_error(self):
+        self._start_tracking(calibration=True)
+        targets = [(40, 30), (280, 30), (40, 210), (280, 210), (160, 120)]
+        with web_app.STATE_LOCK:
+            session = web_app._session
+            drive_calibration(session, np.random.default_rng(3))
+            web_app.complete_calibration(session)
+            self.assertTrue(session.mapper.calibrated)
+            calibrated_count = len(session.mapper.samples)
+            self._inject_grid(session, targets, per_target=6)
+
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["fitted"])
+        self.assertEqual(data["used_targets"], 5)
+        self.assertEqual(data["targets"], 5)
+        self.assertEqual(data["samples"], 30)
+        self.assertIsNotNone(data["pre_error_px"])
+        self.assertIsNotNone(data["post_error_px"])
+        self.assertLess(data["post_error_px"], 100.0)
+        self.assertEqual(data["interval_s"], 5.0)
+
+        with web_app.STATE_LOCK:
+            session = web_app._session
+            self.assertEqual(session.grid_samples, {})    # always cleared
+            self.assertEqual(session.grid_targets, {})
+            self.assertGreaterEqual(len(session.mapper.samples), calibrated_count + 5)
+            self.assertIsNotNone(session.grid_stats)
+
+    def test_grid_finish_rejects_too_few_targets(self):
+        self._start_tracking()
+        with web_app.STATE_LOCK:
+            self._inject_grid(web_app._session, [(60, 60), (200, 150)], per_target=5)
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 400)
+        # buffers were cleared even on failure -> a retry has nothing left
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 400)
+
+    def test_grid_finish_requires_tracking_mode(self):
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 409)
+        self._start_tracking(calibration=True)          # still calibrating
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 409)
+
+    def test_report_contains_grid_stats(self):
+        self._start_tracking()
+        res = self.client.post(
+            "/api/frame", json={"image": png_data_url(blank_frame()), "t_ms": 400.0}
+        )
+        self.assertEqual(res.status_code, 200)
+        targets = [(40, 30), (280, 30), (40, 210), (280, 210)]
+        with web_app.STATE_LOCK:
+            session = web_app._session
+            self._inject_grid(session, targets, per_target=6)
+            inject_gaze(session)
+
+        res = self.client.post("/api/grid/finish", json={})
+        self.assertEqual(res.status_code, 200)
+        res = self.client.post("/api/finish", json={})
+        self.assertEqual(res.status_code, 200)
+        grid = res.get_json()["stats"]["grid"]
+        self.assertIsNotNone(grid)
+        self.assertTrue(grid["fitted"])
+        self.assertEqual(grid["used_targets"], 4)
+        self.assertEqual(grid["samples"], 24)
+        self.assertIsNone(grid["pre_error_px"])          # rough mode: no prior model
+        self.assertIsNotNone(grid["post_error_px"])
 
 
 class ColormapTest(unittest.TestCase):

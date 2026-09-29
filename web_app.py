@@ -35,8 +35,10 @@ from gaze_core import (
     AttentionHeatmap,
     EyeTracker,
     GazeConfig,
+    MappingSample,
     ScreenCalibrator,
     ScreenMapper,
+    robust_median,
 )
 from phase3_attention_heatmap import EventDetector
 
@@ -45,6 +47,13 @@ HTML_PATH = os.path.join(APP_DIR, "web_interface.html")
 
 # hard caps so a huge upload cannot exhaust memory or the heatmap grid
 MAX_DOC_DIM = 2400
+
+# grid-mapping mode: one coloured digit every GRID_INTERVAL_S seconds; the
+# frames shown during each digit become (features -> digit position) samples
+GRID_INTERVAL_S = 5.0
+GRID_MAX_SAMPLES_PER_TARGET = 60
+GRID_MIN_SAMPLES_PER_TARGET = 3
+GRID_MIN_TARGETS = 3
 
 LOGGER = logging.getLogger("web_app")
 
@@ -171,6 +180,10 @@ class TrackingSession:
 
         # (t_ms, x, y, confidence) in display pixels
         self.samples: List[Tuple[float, float, float, float]] = []
+        # grid mapping: digit id -> [(features, confidence)] and id -> target
+        self.grid_samples: Dict[int, List[Tuple[np.ndarray, float]]] = {}
+        self.grid_targets: Dict[int, Tuple[float, float]] = {}
+        self.grid_stats: Optional[Dict[str, object]] = None
         self.frames = 0
         self.face_frames = 0
         self.inference_ms: List[float] = []
@@ -251,8 +264,15 @@ def handle_frame(
     tracker: EyeTracker,
     frame: np.ndarray,
     t_ms: float,
+    grid: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
-    """Run one frame through Phase 1 (+ Phase 2 while calibrating/tracking)."""
+    """Run one frame through Phase 1 (+ Phase 2 while calibrating/tracking).
+
+    `grid` is the currently displayed grid-mapping digit (client-driven):
+    ``{"active", "id", "x", "y", "restart"}`` in document-natural pixels.
+    While a digit is on screen its feature vectors are collected next to the
+    digit position so /api/grid/finish can refit the mapping.
+    """
     result = tracker.process(frame)
     session.frames += 1
     session.inference_ms.append(result.inference_ms)
@@ -304,6 +324,31 @@ def handle_frame(
             )
             response["gaze"] = {"x": float(x), "y": float(y)}
             response["mapper_stats"] = dict(session.mapper.stats)
+
+    if grid and grid.get("active"):
+        try:
+            grid_id = int(grid["id"])
+            grid_x = float(grid["x"])
+            grid_y = float(grid["y"])
+            restart = bool(grid.get("restart", False))
+        except (KeyError, TypeError, ValueError):
+            grid_id = -1
+        else:
+            if restart:
+                session.grid_samples.clear()
+                session.grid_targets.clear()
+            if (
+                grid_id >= 0
+                and result.features is not None
+                and result.confidence >= session.config.calibration_min_confidence
+            ):
+                session.grid_targets[grid_id] = (grid_x, grid_y)
+                bucket = session.grid_samples.setdefault(grid_id, [])
+                if len(bucket) < GRID_MAX_SAMPLES_PER_TARGET:
+                    bucket.append(
+                        (np.asarray(result.features, dtype=np.float64), float(result.confidence))
+                    )
+                    response["grid"] = {"id": grid_id, "collected": len(bucket)}
     return response
 
 
@@ -364,6 +409,7 @@ def build_report(
         if session.inference_ms
         else 0.0,
         "calibration": session.calib_residual,
+        "grid": session.grid_stats,
         "mapping": {
             "model": session.mapper.mapping_name,
             "valid_sample_rate": round(session.mapper.valid_sample_rate, 3),
@@ -412,6 +458,11 @@ def create_session() -> Response:
         if rect_w <= 0 or rect_h <= 0:
             raise ValueError("rect must be positive")
         points = int(payload.get("points", 5))
+        calibration = bool(payload.get("calibration", True))
+        if points == 0:
+            # "None — rough centre mapping": no calibrator, points are irrelevant
+            calibration = False
+            points = 5
         if points not in (5, 9, 13):
             raise ValueError("points must be 5, 9 or 13")
         model = str(payload.get("model", "affine"))
@@ -420,7 +471,6 @@ def create_session() -> Response:
     except (KeyError, TypeError, ValueError) as exc:
         return jsonify({"error": f"invalid session payload: {exc}"}), 400
 
-    calibration = bool(payload.get("calibration", True))
     config = GazeConfig(calibration_points=points, mapping_model=model)
     config.validate()
 
@@ -472,11 +522,94 @@ def frame() -> Response:
             return jsonify({"error": "no active session"}), 409
         try:
             tracker = get_tracker()
-            response = handle_frame(_session, tracker, image_bgr, t_ms)
+            response = handle_frame(_session, tracker, image_bgr, t_ms,
+                                    grid=payload.get("grid"))
         except Exception as exc:  # keep the loop alive on a single bad frame
             LOGGER.exception("frame processing failed")
             return jsonify({"error": f"frame failed: {exc}"}), 500
     return jsonify(response)
+
+
+@app.route("/api/grid/finish", methods=["POST"])
+def grid_finish() -> Response:
+    """Refit the mapping model from the collected grid-digit samples.
+
+    Each digit contributes one representative (median) feature vector paired
+    with the digit's display position.  The error before and after the refit
+    is reported so the improvement is measured, not claimed.
+    """
+    with STATE_LOCK:
+        if _session is None:
+            return jsonify({"error": "no active session"}), 409
+        if _session.mode != "tracking":
+            return jsonify({"error": "grid mapping runs while tracking"}), 409
+        session = _session
+        config = session.config
+
+        new_samples: List[MappingSample] = []
+        pre_errors: List[float] = []
+        total_samples = 0
+        for grid_id, (natural_x, natural_y) in session.grid_targets.items():
+            rows = session.grid_samples.get(grid_id, [])
+            total_samples += len(rows)
+            if len(rows) < GRID_MIN_SAMPLES_PER_TARGET:
+                continue
+            representative = robust_median(
+                [row[0] for row in rows], config.calibration_outlier_z
+            )
+            if representative is None:
+                continue
+            display_x = natural_x * session.rect["w"] / max(session.doc_width, 1)
+            display_y = natural_y * session.rect["h"] / max(session.doc_height, 1)
+            target = (float(display_x), float(display_y))
+            if session.mapper.calibrated:
+                predicted = session.mapper.model.predict(
+                    representative.reshape(1, -1)
+                )[0]
+                pre_errors.append(
+                    math.hypot(predicted[0] - target[0], predicted[1] - target[1])
+                )
+            new_samples.append(MappingSample(representative, target))
+
+        session.grid_samples.clear()
+        session.grid_targets.clear()
+
+        if len(new_samples) < GRID_MIN_TARGETS:
+            return jsonify({
+                "error": (
+                    f"only {len(new_samples)} usable digit(s) with enough samples - "
+                    f"need at least {GRID_MIN_TARGETS} (face visible, looking at the digits)"
+                ),
+                "fitted": False,
+            }), 400
+
+        merged = list(session.mapper.samples) + new_samples
+        fitted = session.mapper.fit(merged)
+
+        post_errors: List[float] = []
+        if fitted:
+            for sample in new_samples:
+                predicted = session.mapper.model.predict(
+                    np.asarray(sample.features, dtype=np.float64).reshape(1, -1)
+                )[0]
+                post_errors.append(
+                    math.hypot(predicted[0] - sample.target[0],
+                               predicted[1] - sample.target[1])
+                )
+
+        session.grid_stats = {
+            "targets": len(new_samples),
+            "used_targets": len(new_samples),
+            "samples": total_samples,
+            "pre_error_px": round(float(np.mean(pre_errors)), 1) if pre_errors else None,
+            "post_error_px": round(float(np.mean(post_errors)), 1) if post_errors else None,
+            "fitted": bool(fitted),
+            "interval_s": GRID_INTERVAL_S,
+        }
+        if not fitted:
+            session.grid_stats["error"] = "mapping fit failed (not enough feature spread)"
+        LOGGER.info("grid mapping: %s", session.grid_stats)
+    return jsonify(session.grid_stats)
 
 
 @app.route("/api/finish", methods=["POST"])
@@ -528,7 +661,13 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     print(f"Open http://{args.host}:{args.port} in your browser "
           f"(webcam permission required; localhost is a secure context)")
-    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    try:
+        app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    except OSError as exc:
+        print(f"Could not start the server on {args.host}:{args.port} ({exc}).\n"
+              f"Another program is probably using that port — try:\n"
+              f"    python web_app.py --port 5001")
+        return 1
     return 0
 
 

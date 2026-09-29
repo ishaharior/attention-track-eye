@@ -17,6 +17,9 @@
     --dim: #8b97a5; --accent: #4da3ff; --warn: #f0a53a; --ok: #46d18a;
   }
   * { box-sizing: border-box; }
+  /* author display rules (.btn, #docArea, #dropzone...) must not defeat the
+     hidden attribute — otherwise every toggled element stays visible */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
@@ -53,9 +56,9 @@
   .hint.warn { color: var(--warn); }
   #docArea {
     position: absolute; inset: 0; display: flex; align-items: center;
-    justify-content: center; padding: 16px;
+    justify-content: center; padding: 0;
   }
-  #docBox { position: relative; line-height: 0; box-shadow: 0 8px 30px rgba(0,0,0,.55); }
+  #docBox { position: relative; line-height: 0; box-shadow: 0 0 0 1px #2b3441, 0 8px 30px rgba(0,0,0,.55); }
   #docCanvas { display: block; background: #fff; }
   #overlayCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
   #calibHint {
@@ -115,6 +118,13 @@
     padding: 10px 16px; border-radius: 8px; max-width: 80%; z-index: 50; font-size: 13px;
   }
   #toast.ok { background: #12271d; color: #a9edcc; border-color: #2c5c44; }
+  #toast.ok { background: #12271d; color: #a9edcc; border-color: #2c5c44; }
+  .banner {
+    position: absolute; z-index: 30; left: 12px; right: 12px; top: 12px;
+    background: #2a1512; border: 1px solid #7a2e22; color: #ffc9bd;
+    padding: 10px 14px; border-radius: 8px; font-size: 13px;
+  }
+  .banner code { background: #1a0f0c; padding: 1px 6px; border-radius: 4px; color: #ffe2db; }
   .checks { margin-top: 8px; font-size: 12.5px; color: var(--dim); display: flex; gap: 8px; align-items: center; }
 </style>
 </head>
@@ -127,6 +137,11 @@
 
 <main>
   <section id="stage">
+    <div id="serverBanner" class="banner" hidden>
+      <strong>Local server not connected.</strong> Run <code>python web_app.py</code> in the
+      project folder, then open <code>http://127.0.0.1:5000</code> — do not open this HTML
+      file directly (a local file cannot use the camera or the pipeline).
+    </div>
     <div id="dropzone">
       <div class="drop-inner">
         <p class="big">Drop a document here</p>
@@ -134,7 +149,8 @@
         <label class="btn file">Choose PNG / JPG / PDF
           <input id="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" hidden>
         </label>
-        <p class="hint">Runs entirely on this machine — no frames leave your computer.</p>
+        <p class="hint">After upload the camera starts automatically. Runs entirely on this
+          machine — no frames leave your computer.</p>
         <p class="hint warn" id="pdfNote" hidden>PDF.js could not load (offline?). PDF uploads are disabled; PNG/JPG still work.</p>
       </div>
     </div>
@@ -199,6 +215,15 @@
       <div class="row kv"><span>calibration residual</span><span id="residVal">–</span></div>
     </div>
 
+    <div class="panel" id="gridPanel" hidden>
+      <h3>Grid mapping</h3>
+      <p class="hint">Overlay a numbered grid: every 5&nbsp;s a coloured digit pops up —
+        look at each digit. The recorded gaze points refit the screen ↔ camera mapping
+        (measured before/after error).</p>
+      <button class="btn" id="gridBtn">Show grid</button>
+      <div class="row kv"><span>status</span><span id="gridStatus">–</span></div>
+    </div>
+
     <div class="panel" id="actionsPanel">
       <button class="btn primary" id="startBtn" disabled>Start camera &amp; tracking</button>
       <button class="btn warn" id="finishBtn" hidden>Finish — build heatmap report</button>
@@ -223,7 +248,8 @@
 // ---------------------------------------------------------------- elements
 const $ = (id) => document.getElementById(id);
 const els = {
-  statusChip: $("statusChip"), dropzone: $("dropzone"), fileInput: $("fileInput"),
+  statusChip: $("statusChip"), stage: $("stage"), serverBanner: $("serverBanner"),
+  dropzone: $("dropzone"), fileInput: $("fileInput"),
   pdfNote: $("pdfNote"), docArea: $("docArea"), docBox: $("docBox"),
   docCanvas: $("docCanvas"), overlay: $("overlayCanvas"), calibHint: $("calibHint"),
   reportArea: $("reportArea"), reportImg: $("reportImg"),
@@ -233,6 +259,8 @@ const els = {
   confBar: $("confBar"), confVal: $("confVal"), calibBar: $("calibBar"),
   calibVal: $("calibVal"), fpsVal: $("fpsVal"), inferVal: $("inferVal"),
   faceVal: $("faceVal"), residVal: $("residVal"),
+  gridPanel: $("gridPanel"), gridBtn: $("gridBtn"), gridStatus: $("gridStatus"),
+  actionsPanel: $("actionsPanel"),
   startBtn: $("startBtn"), finishBtn: $("finishBtn"), resetBtn: $("resetBtn"),
   stopBtn: $("stopBtn"), statsPanel: $("statsPanel"), statsTable: $("statsTable"),
   pngBtn: $("pngBtn"), jsonBtn: $("jsonBtn"), toast: $("toast"),
@@ -255,6 +283,13 @@ let liveTarget = null;       // calibration target, rect-relative px
 let lastReport = null;
 let fpsTimes = [];
 let busy = false;
+let grid = null;            // active grid-mapping run {on, items, idx, timer, ...}
+
+const GRID = { cols: 6, rows: 6, count: 10, intervalMs: 5000 };
+const GRID_COLORS = [
+  "#ff5252", "#40c4ff", "#69f0ae", "#ffd740", "#e040fb",
+  "#ff6e40", "#18ffff", "#b2ff59", "#ff4081", "#7c4dff",
+];
 
 // ---------------------------------------------------------------- helpers
 function toast(message, ok) {
@@ -262,10 +297,31 @@ function toast(message, ok) {
   els.toast.className = ok ? "ok" : "";
   els.toast.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { els.toast.hidden = true; }, 5000);
+  toast._t = setTimeout(() => { els.toast.hidden = true; }, ok ? 4000 : 9000);
 }
 
 function pct(v) { return (v * 100).toFixed(0) + "%"; }
+
+async function ensureServer() {
+  if (location.protocol === "file:") {
+    els.serverBanner.hidden = false;
+    throw new Error(
+      "This HTML was opened as a local file. Run: python web_app.py  " +
+      "then open http://127.0.0.1:5000"
+    );
+  }
+  try {
+    const res = await fetch("/api/health", { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status " + res.status);
+    els.serverBanner.hidden = true;
+  } catch (err) {
+    els.serverBanner.hidden = false;
+    throw new Error(
+      "Cannot reach the local server. Run: python web_app.py  " +
+      "then reload this page"
+    );
+  }
+}
 
 function setState(next) {
   state = next;
@@ -283,6 +339,9 @@ function setState(next) {
   els.stopBtn.hidden = !stream;
   els.statsPanel.hidden = next !== "report";
   els.calibHint.hidden = next !== "calibrating";
+  els.gridPanel.hidden = next !== "tracking";
+  els.actionsPanel.hidden = next === "idle";   // nothing to act on before a document
+  if (next !== "tracking") cancelGrid();
 
   const chips = {
     idle: ["no document", ""], ready: ["document ready", ""], starting: ["starting…", "warn"],
@@ -308,7 +367,7 @@ async function post(url, payload) {
 // ---------------------------------------------------------------- document
 async function handleFile(file) {
   if (!file) return;
-  hardReset(false);
+  await hardReset(false);          // sequential so state changes cannot race
   try {
     let source, pages = null;
     if (file.type === "application/pdf" || /\.pdf$/i.test(file.name)) {
@@ -326,9 +385,12 @@ async function handleFile(file) {
     setState("ready");
     fitDoc();
   } catch (err) {
-    toast(err.message || "could not open the file");
+    toast(err.message || "could not open that file");
     if (!hasDoc) setState("idle");
+    return;
   }
+  toast("Document loaded — starting the camera…", true);
+  startSession();                   // camera permission + tracking begin right away
 }
 
 function loadImage(file) {
@@ -392,8 +454,9 @@ function setDocument(source) {
 function fitDoc() {
   if (!hasDoc || (state !== "ready" && state !== "idle" && state !== "failed")) return;
   const area = els.docArea.getBoundingClientRect();
-  const availW = Math.max(area.width - 32, 50);
-  const availH = Math.max(area.height - 32, 50);
+  // the document fills the whole stage section (contain, no margins)
+  const availW = Math.max(area.width, 50);
+  const availH = Math.max(area.height, 50);
   const scale = Math.min(availW / els.docCanvas.width, availH / els.docCanvas.height);
   els.docCanvas.style.width = Math.round(els.docCanvas.width * scale) + "px";
   els.docCanvas.style.height = Math.round(els.docCanvas.height * scale) + "px";
@@ -404,11 +467,33 @@ function fitDoc() {
 
 // ---------------------------------------------------------------- camera
 async function startCamera() {
-  if (stream) return;
-  stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-    audio: false,
-  });
+  const live = stream && stream.getTracks().some((t) => t.readyState === "live");
+  if (live) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error(
+      "Camera API unavailable — open this page at http://127.0.0.1:5000 " +
+      "in Chrome, Edge or Firefox (not as a local file)"
+    );
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+      audio: false,
+    });
+  } catch (err) {
+    stream = null;
+    const hints = {
+      NotAllowedError:
+        "Camera permission denied — click the camera icon in the address bar, " +
+        "choose Allow, then press Start again",
+      NotReadableError:
+        "The camera is in use by another application — close it and press Start again",
+      NotFoundError: "No camera found — connect a webcam and press Start again",
+      OverconstrainedError: "The camera does not support the requested settings",
+      SecurityError: "Browser blocked the camera — open the page at http://127.0.0.1:5000",
+    };
+    throw new Error(hints[err.name] || ("Camera failed: " + (err.message || err.name)));
+  }
   els.cam.srcObject = stream;
   await els.cam.play().catch(() => {});
   if (!els.cam.videoWidth) {
@@ -434,6 +519,8 @@ async function startSession() {
   const rect = els.docBox.getBoundingClientRect();   // capture while layout is stable
   setState("starting");
   try {
+    if (pendingReset) await pendingReset;   // never race a reset against session creation
+    await ensureServer();          // fail fast with instructions if the server is missing
     await startCamera();
     sessionRect = rect;
     if (sessionRect.width < 80 || sessionRect.height < 80) {
@@ -449,11 +536,15 @@ async function startSession() {
     const data = await post("/api/session", payload);
     lastGaze = null; trail = []; liveTarget = null; fpsTimes = [];
     els.residVal.textContent = "–";
-    setState(data.mode === "calibrating" ? "calibrating" : "tracking");
+    const calibrating = data.mode === "calibrating";
+    setState(calibrating ? "calibrating" : "tracking");
     startLoop();
+    toast(calibrating
+      ? "Camera on — look at the calibration dot"
+      : "Camera on — tracking (rough mode)", true);
   } catch (err) {
     toast(err.message);
-    setState("ready");
+    setState(hasDoc ? "ready" : "idle");
   } finally {
     busy = false;
     setState(state);   // refresh enabled/disabled flags
@@ -477,10 +568,22 @@ async function tick() {
   try {
     const ctx = capture.getContext("2d");
     ctx.drawImage(els.cam, 0, 0, capture.width, capture.height);
-    const data = await post("/api/frame", {
+    const payload = {
       image: capture.toDataURL("image/jpeg", 0.7),
       t_ms: performance.now(),
-    });
+    };
+    if (grid && grid.on && grid.idx < grid.items.length) {
+      const cur = grid.items[grid.idx];
+      payload.grid = {
+        active: true,
+        id: grid.idx,
+        x: cur.nx,
+        y: cur.ny,
+        restart: grid.restart,
+      };
+      grid.restart = false;
+    }
+    const data = await post("/api/frame", payload);
     handleFrame(data);
   } catch (err) {
     toast(err.message);
@@ -542,6 +645,7 @@ function handleFrame(data) {
     trail.push({ x: lastGaze.x, y: lastGaze.y });
     if (trail.length > 50) trail.shift();
   }
+  if (data.grid) updateGridStatus(data.grid.collected);
 }
 
 // ---------------------------------------------------------------- overlay
@@ -588,11 +692,154 @@ function drawOverlay() {
     octx.beginPath(); octx.arc(lastGaze.x, lastGaze.y, 2.5, 0, Math.PI * 2); octx.fill();
     octx.restore();
   }
+
+  if (grid && grid.on) drawGrid();
+}
+
+// ---------------------------------------------------------------- grid mapping
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function gridScale() {
+  return {
+    sx: els.docCanvas.clientWidth / Math.max(els.docCanvas.width, 1),
+    sy: els.docCanvas.clientHeight / Math.max(els.docCanvas.height, 1),
+  };
+}
+
+function drawGrid() {
+  const { sx, sy } = gridScale();
+  const w = els.docCanvas.clientWidth, h = els.docCanvas.clientHeight;
+  octx.save();
+  octx.strokeStyle = "rgba(77,163,255,.30)";
+  octx.lineWidth = 1;
+  for (let c = 1; c < GRID.cols; c++) {
+    octx.beginPath(); octx.moveTo((c * w) / GRID.cols, 0);
+    octx.lineTo((c * w) / GRID.cols, h); octx.stroke();
+  }
+  for (let r = 1; r < GRID.rows; r++) {
+    octx.beginPath(); octx.moveTo(0, (r * h) / GRID.rows);
+    octx.lineTo(w, (r * h) / GRID.rows); octx.stroke();
+  }
+  const cur = grid.items[grid.idx];
+  if (cur) {
+    const cx = cur.nx * sx, cy = cur.ny * sy;
+    const base = Math.max(20, Math.min(w, h) * 0.045);
+    const rad = base * (1 + 0.07 * Math.sin(performance.now() / 300));
+    octx.fillStyle = cur.color;
+    octx.strokeStyle = "rgba(10,13,16,.75)";
+    octx.lineWidth = 3;
+    octx.beginPath(); octx.arc(cx, cy, rad, 0, Math.PI * 2);
+    octx.fill(); octx.stroke();
+    octx.fillStyle = "#0e1114";
+    octx.font = "700 " + Math.round(rad * 1.2) + "px system-ui, sans-serif";
+    octx.textAlign = "center";
+    octx.textBaseline = "middle";
+    octx.fillText(cur.digit, cx, cy + 1);
+  }
+  octx.restore();
+}
+
+function startGrid() {
+  if (!hasDoc) return;
+  const w = els.docCanvas.width, h = els.docCanvas.height;
+  const cells = [];
+  for (let r = 0; r < GRID.rows; r++) {
+    for (let c = 0; c < GRID.cols; c++) {
+      cells.push({
+        nx: ((c + 0.5) * w) / GRID.cols,
+        ny: ((r + 0.5) * h) / GRID.rows,
+      });
+    }
+  }
+  const picked = shuffled(cells).slice(0, GRID.count);
+  const digits = shuffled(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  grid = {
+    on: true,
+    idx: 0,
+    timer: null,
+    restart: true,       // first frame tells the server to drop stale samples
+    items: picked.map((cell, i) => ({
+      nx: cell.nx, ny: cell.ny,
+      digit: digits[i],
+      color: GRID_COLORS[i % GRID_COLORS.length],
+    })),
+  };
+  els.gridBtn.textContent = "Stop grid — fit mapping";
+  updateGridStatus(null);
+  armGridTimer();
+  toast("Grid on — a coloured digit every 5 s, look at each one", true);
+}
+
+function armGridTimer() {
+  clearTimeout(grid.timer);
+  grid.timer = setTimeout(() => {
+    if (!grid || !grid.on) return;
+    grid.idx += 1;
+    if (grid.idx >= grid.items.length) { finishGrid(); return; }
+    updateGridStatus(null);
+    armGridTimer();
+  }, GRID.intervalMs);
+}
+
+function updateGridStatus(samples) {
+  if (!grid) return;
+  const n = Math.min(grid.idx + 1, grid.items.length);
+  els.gridStatus.textContent =
+    n + "/" + grid.items.length + " · 5 s each" +
+    (samples != null ? " · " + samples + " samples" : "");
+}
+
+async function finishGrid() {
+  if (!grid) return;
+  clearTimeout(grid.timer);
+  grid.on = false;
+  els.gridBtn.textContent = "Show grid";
+  try {
+    const res = await post("/api/grid/finish", {});
+    if (res.fitted) {
+      const pre = res.pre_error_px != null ? res.pre_error_px : null;
+      const post = res.post_error_px != null ? res.post_error_px : null;
+      toast(
+        "Grid mapping fitted: " + res.used_targets + " digits · error " +
+        (post != null ? post.toFixed(1) + " px" : "n/a") +
+        (pre != null ? " (before: " + pre.toFixed(1) + " px)" : ""),
+        true
+      );
+      els.gridStatus.textContent =
+        res.used_targets + "/" + res.targets + " · " +
+        (post != null ? post.toFixed(1) + " px error" : "fitted");
+    } else {
+      toast(res.error || "Grid mapping could not be fitted", false);
+      els.gridStatus.textContent = "not fitted";
+    }
+  } catch (err) {
+    toast(err.message, false);
+    els.gridStatus.textContent = "failed";
+  }
+  grid = null;
+  els.gridBtn.textContent = "Show grid";
+}
+
+function cancelGrid() {
+  if (!grid) return;
+  clearTimeout(grid.timer);
+  grid = null;
+  els.gridBtn.textContent = "Show grid";
+  els.gridStatus.textContent = "–";
 }
 requestAnimationFrame(drawOverlay);
 
 // ---------------------------------------------------------------- finish / report
 async function finishSession() {
+  if (grid && grid.on) await finishGrid();   // keep the grid mapping in the report
+  else cancelGrid();
   stopLoop();
   try {
     const data = await post("/api/finish", { decay: els.decayChk.checked });
@@ -635,6 +882,14 @@ function fillStats(s) {
       : "off — full session"],
     ["Colormap", s.heatmap.colormap],
   ];
+  if (s.grid) {
+    rows.push(["Grid digits fitted", s.grid.used_targets + "/" + s.grid.targets]);
+    rows.push(["Grid samples", s.grid.samples]);
+    rows.push(["Mapping error before grid",
+      s.grid.pre_error_px != null ? s.grid.pre_error_px + " px" : "n/a (no model yet)"]);
+    rows.push(["Mapping error after grid",
+      s.grid.post_error_px != null ? s.grid.post_error_px + " px" : "not fitted"]);
+  }
   els.statsTable.innerHTML = rows
     .map((r) => "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>")
     .join("");
@@ -647,31 +902,55 @@ function download(href, name) {
 }
 
 // ---------------------------------------------------------------- reset
+let pendingReset = null;
+
 async function hardReset(backToIdle) {
+  cancelGrid();
   stopLoop();
-  try { await post("/api/reset"); } catch (err) { /* no session is fine */ }
+  pendingReset = post("/api/reset").catch(() => { /* no session is fine */ });
+  try { await pendingReset; } finally { pendingReset = null; }
   lastGaze = null; trail = []; liveTarget = null; lastReport = null;
   els.reportImg.removeAttribute("src");
   els.confBar.style.width = "0%"; els.calibBar.style.width = "0%";
   els.confVal.textContent = "–"; els.calibVal.textContent = "–";
   els.fpsVal.textContent = "–"; els.inferVal.textContent = "–";
   els.faceVal.textContent = "–"; els.residVal.textContent = "–";
+  if (busy) return;                     // a startSession is running — do not clobber its state
   setState(backToIdle || !hasDoc ? "idle" : "ready");
   if (hasDoc && !backToIdle) fitDoc();
 }
 
 // ---------------------------------------------------------------- wiring
-els.fileInput.addEventListener("change", (e) => handleFile(e.target.files[0]));
-["dragover", "dragenter"].forEach((ev) =>
-  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.add("drag"); }));
-["dragleave", "drop"].forEach((ev) =>
-  els.dropzone.addEventListener(ev, (e) => { e.preventDefault(); els.dropzone.classList.remove("drag"); }));
-els.dropzone.addEventListener("drop", (e) => handleFile(e.dataTransfer.files[0]));
+els.fileInput.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";            // allow re-selecting the same file
+  handleFile(file);
+});
+
+// drag & drop works anywhere on the page; the document-level handler also
+// stops the browser from navigating away when a file is dropped
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  els.dropzone.classList.add("drag");
+});
+document.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) els.dropzone.classList.remove("drag");
+});
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  els.dropzone.classList.remove("drag");
+  const file = e.dataTransfer && e.dataTransfer.files[0];
+  if (file) handleFile(file);
+});
 
 els.startBtn.addEventListener("click", startSession);
 els.finishBtn.addEventListener("click", finishSession);
 els.resetBtn.addEventListener("click", () => hardReset(false));
 els.stopBtn.addEventListener("click", stopCamera);
+els.gridBtn.addEventListener("click", () => {
+  if (grid && grid.on) finishGrid();
+  else if (state === "tracking") startGrid();
+});
 els.replaceBtn.addEventListener("click", () => { hardReset(true); els.fileInput.click(); });
 els.pngBtn.addEventListener("click", () => {
   if (lastReport) download(lastReport.heatmap_png, "gaze_heatmap.png");
@@ -686,6 +965,7 @@ window.addEventListener("resize", () => { if (state === "ready") fitDoc(); });
 
 if (typeof window.pdfjsLib === "undefined") els.pdfNote.hidden = false;
 setState("idle");
+ensureServer().catch(() => { });   // show the banner immediately if the server is missing
 </script>
 </body>
 </html>

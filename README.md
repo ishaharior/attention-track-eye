@@ -381,10 +381,16 @@ python web_app.py            # then open http://127.0.0.1:5000
    rough centre mapping. Options also cover the mapping model and time decay.
 3. **Watch** the live gaze dot move on the document; the sidebar shows confidence,
    fps, face detection and the calibration residual.
-4. **Finish — build heatmap report** overlays the accumulated, confidence-weighted
+4. **Grid view (optional)** — press **Show grid** to overlay a 6×6 grid. Every 5 s a
+   coloured digit (0–9, shuffled) pops up in a different cell; look at each digit.
+   **Stop grid — fit mapping** refits the screen ↔ camera model from the collected
+   points and reports the measured mapping error before and after the refit — the
+   document fills the whole stage so the grid covers it edge to edge.
+5. **Finish — build heatmap report** overlays the accumulated, confidence-weighted
    gaze density on the uploaded document at its natural scale — TURBO colormap,
    blue = low density, red = high density — plus session statistics (fixations,
-   saccades, durations, calibration residual, heatmap parameters) and PNG/JSON export.
+   saccades, durations, calibration residual, heatmap parameters, grid-mapping
+   stats when used) and PNG/JSON export.
 
 Everything runs locally: video frames travel only from your browser to
 `127.0.0.1`. The demo reuses the exact pipeline from the CLIs (`EyeTracker` →
