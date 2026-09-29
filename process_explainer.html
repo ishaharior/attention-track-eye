@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>attention-track-eye — How It Works</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2b3444;
+    --txt:#e6edf3; --muted:#9aa7b5; --accent:#38bdf8; --accent2:#facc15;
+    --green:#3ddc84; --red:#ff6b6b; --purple:#c084fc; --orange:#fb923c;
+    --mono:"Cascadia Code","Consolas","Courier New",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:"Segoe UI",system-ui,sans-serif;line-height:1.6}
+  a{color:var(--accent)}
+  header{
+    padding:44px 24px 30px;text-align:center;
+    background:radial-gradient(ellipse at 50% -20%, #1b3a52 0%, transparent 60%), var(--bg);
+    border-bottom:1px solid var(--line);
+  }
+  header h1{font-size:2.1rem;letter-spacing:.5px}
+  header h1 span{color:var(--accent)}
+  header p{color:var(--muted);max-width:820px;margin:10px auto 0;font-size:1.02rem}
+  .badge{
+    display:inline-block;margin-top:14px;padding:5px 14px;border:1px solid var(--line);
+    border-radius:999px;font-family:var(--mono);font-size:.8rem;color:var(--accent2);
+    background:rgba(250,204,21,.06);
+  }
+  main{max-width:1080px;margin:0 auto;padding:34px 20px 80px}
+
+  /* ---------- pipeline ---------- */
+  .pipeline{display:flex;gap:0;align-items:stretch;justify-content:center;flex-wrap:wrap;margin:10px 0 40px}
+  .stage{
+    flex:1;min-width:210px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:18px 16px;position:relative;transition:.2s;cursor:pointer;
+  }
+  .stage:hover{border-color:var(--accent);transform:translateY(-3px)}
+  .stage .num{
+    font-family:var(--mono);font-size:.75rem;color:var(--bg);background:var(--accent);
+    border-radius:6px;padding:1px 7px;font-weight:bold;
+  }
+  .stage h3{margin:10px 0 6px;font-size:1.02rem}
+  .stage p{font-size:.85rem;color:var(--muted)}
+  .arrow{
+    display:flex;align-items:center;justify-content:center;width:44px;color:var(--accent);
+    font-size:1.5rem;flex:none;
+  }
+  @media(max-width:760px){
+    .pipeline{flex-direction:column;align-items:stretch}
+    .arrow{width:auto;height:34px;transform:rotate(90deg)}
+  }
+
+  /* ---------- sections ---------- */
+  section{margin-bottom:46px}
+  h2{
+    font-size:1.45rem;margin-bottom:6px;display:flex;align-items:center;gap:10px;
+    padding-bottom:8px;border-bottom:1px solid var(--line);
+  }
+  h2 .tag{
+    font-family:var(--mono);font-size:.72rem;padding:2px 9px;border-radius:6px;
+    background:rgba(56,189,248,.12);color:var(--accent);border:1px solid rgba(56,189,248,.35);
+  }
+  .sub{color:var(--muted);font-size:.95rem;margin-bottom:18px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;
+  }
+  .card h4{font-size:1rem;margin-bottom:8px;color:var(--accent2)}
+  .card p,.card li{font-size:.9rem;color:#c9d4e0}
+  .card ul{padding-left:18px}
+  .card li{margin-bottom:5px}
+  code{
+    font-family:var(--mono);font-size:.85em;background:#0b0f14;border:1px solid var(--line);
+    padding:1px 6px;border-radius:5px;color:var(--green);
+  }
+  .ref{font-family:var(--mono);font-size:.76rem;color:var(--purple)}
+
+  /* steps list */
+  .steps{counter-reset:s;list-style:none;margin-top:6px}
+  .steps li{
+    counter-increment:s;position:relative;padding:10px 0 10px 46px;border-bottom:1px dashed var(--line);
+    font-size:.92rem;
+  }
+  .steps li:last-child{border-bottom:none}
+  .steps li::before{
+    content:counter(s);position:absolute;left:0;top:10px;width:28px;height:28px;
+    background:var(--panel2);border:1px solid var(--accent);color:var(--accent);
+    border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:.8rem;font-weight:bold;
+  }
+
+  /* ---------- svg diagram ---------- */
+  .diagram{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:18px;overflow-x:auto;margin-top:16px;
+  }
+  .diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+
+  /* ---------- interactive demo ---------- */
+  .demo{
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;margin-top:18px;
+  }
+  .demo-note{
+    border:1px dashed var(--accent2);background:rgba(250,204,21,.06);border-radius:10px;
+    padding:12px 14px;font-size:.88rem;color:#e9d9a6;margin-bottom:16px;
+  }
+  .demo-row{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}
+  .demo-controls{flex:1;min-width:260px}
+  .demo-controls label{display:block;font-size:.85rem;color:var(--muted);margin:12px 0 4px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .val{float:right;color:var(--accent);font-family:var(--mono);font-size:.8rem}
+  .btnrow{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}
+  button{
+    background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;
+    padding:8px 16px;font-size:.88rem;cursor:pointer;transition:.15s;font-family:inherit;
+  }
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:rgba(56,189,248,.15);border-color:var(--accent);color:var(--accent)}
+  .demo-out{
+    flex:1;min-width:280px;font-family:var(--mono);font-size:.82rem;background:#0b0f14;
+    border:1px solid var(--line);border-radius:10px;padding:14px;white-space:pre-wrap;
+    color:#9fe8ff;min-height:210px;
+  }
+  #heatCanvas{border:1px solid var(--line);border-radius:10px;background:#111;display:block;margin-top:14px;max-width:100%}
+
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:.87rem;margin-top:10px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--accent2);font-weight:600}
+  td code{border:none;background:none;padding:0;color:var(--green)}
+
+  details{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:0 16px;margin-top:12px;
+  }
+  summary{cursor:pointer;padding:12px 0;font-weight:600;color:var(--accent);list-style:none}
+  summary::before{content:"▸ ";transition:.2s}
+  details[open] summary::before{content:"▾ "}
+  details .body{padding-bottom:14px;font-size:.9rem;color:#c9d4e0}
+
+  footer{
+    border-top:1px solid var(--line);padding:24px;text-align:center;color:var(--muted);font-size:.85rem;
+  }
+  .flow{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .chip{
+    font-family:var(--mono);font-size:.78rem;background:var(--panel2);border:1px solid var(--line);
+    padding:4px 10px;border-radius:7px;color:#c9d4e0;
+  }
+  .chip b{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>attention-track-<span>eye</span> — Work Process</h1>
+  <p>A 3-phase webcam <b>gaze-estimation</b> pipeline: MediaPipe face mesh → eye + head-pose
+     feature extraction → calibrated feature→screen mapping → fixation-aware
+     <b>gaze-density heatmap</b>. Pupil/iris and facial features are inputs to a calibrated
+     model — pupil position alone is never treated as the direct gaze direction.</p>
+  <div class="badge">gaze_core.py + phase1 / phase2 / phase3</div>
+</header>
+
+<main>
+
+  <!-- ============ 1. SYSTEM OVERVIEW ============ -->
+  <section id="overview">
+    <h2>1 · System overview <span class="tag">architecture</span></h2>
+    <p class="sub">Webcam frames flow through three phases. Each phase is a separate script;
+    <code>gaze_core.py</code> holds the shared configuration, feature definitions, confidence
+    model, mapping models and heatmap used by all of them.</p>
+
+    <div class="pipeline">
+      <div class="stage" onclick="go('phase1')">
+        <span class="num">INPUT</span>
+        <h3>Webcam Frame</h3>
+        <p><code>cv2.VideoCapture</code> grabs 1280×720 frames, mirrored horizontally by default.</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="stage" onclick="go('phase1')">
+        <span class="num">PHASE 1</span>
+        <h3>Eye + Head-Pose Features</h3>
+        <p>FaceMesh 478 landmarks → eye warp 200×100 → pupil/iris + <code>solvePnP</code> head pose
+           → 11-channel feature vector → confidence-weighted eye fusion.</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="stage" onclick="go('phase2')">
+        <span class="num">PHASE 2</span>
+        <h3>Calibration &amp; Mapping</h3>
+        <p>5/9/13-point multi-sample calibration → affine | polynomial | MLP → outlier rejection
+           → EMA → 1920×1080 pixels.</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="stage" onclick="go('phase3')">
+        <span class="num">PHASE 3</span>
+        <h3>Gaze-Density Heatmap</h3>
+        <p>I-DT/I-VT fixation detection → confidence- &amp; fixation-weighted accumulation →
+           <code>exp(−Δt/τ)</code> decay → Gaussian blur → TURBO render.</p>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h4>Files &amp; responsibilities</h4>
+        <ul>
+          <li><code>gaze_core.py</code> (2054 lines) — config, features, confidence, head pose,
+              fusion, calibration, mapping models, heatmap.</li>
+          <li><code>phase1_eye_tracking.py</code> (210) — live eye / head-pose feature view.</li>
+          <li><code>phase2_coordinate_mapping.py</code> (890) — calibration, mapping, validation,
+              evaluation reports.</li>
+          <li><code>phase3_attention_heatmap.py</code> (713) — fixation detection, accumulation,
+              decay, rendering, export.</li>
+          <li><code>test_gaze_pipeline.py</code> (829) — 52 offline tests, no webcam needed.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Run commands</h4>
+        <ul>
+          <li><code>pip install -r requirements.txt</code> (mediapipe, opencv, numpy)</li>
+          <li><code>python phase1_eye_tracking.py</code></li>
+          <li><code>python phase2_coordinate_mapping.py --screen 1920x1080</code></li>
+          <li><code>python phase2_coordinate_mapping.py --validate --compare-models</code></li>
+          <li><code>python phase3_attention_heatmap.py --background camera</code></li>
+          <li><code>python -m unittest -v test_gaze_pipeline</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Key defaults</h4>
+        <ul>
+          <li><code>RECT 200×100</code>, <code>EYE_PAD 1.25</code> — eye crop</li>
+          <li><code>gain 3.0</code>, <code>ema_alpha 0.3</code>, <code>warmup 45</code> frames</li>
+          <li><code>cell 4 px</code>, <code>σ 45 px</code>, <code>τ 5 s</code>, <code>γ 0.75</code>, <code>α 0.7</code></li>
+          <li><code>confidence_threshold 0.5</code>, heatmap gate <code>0.35</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 2. PHASE 1 ============ -->
+  <section id="phase1">
+    <h2>2 · Phase 1 — Eye &amp; head-pose feature extraction <span class="tag">phase1_eye_tracking.py</span></h2>
+    <p class="sub">Turn a webcam frame into a normalized 11-channel feature vector plus five
+    separate confidence components. Pupil/iris localization, per-eye gaze input and screen gaze
+    are kept conceptually distinct: screen coordinates only exist after Phase 2 calibration.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h4>What it does</h4>
+        <ul>
+          <li>Runs MediaPipe <code>FaceMesh</code> (468 + iris landmarks, 478 total) per frame.</li>
+          <li>Crops both eyes into fixed <b>200×100</b> rectangles via perspective warp.</li>
+          <li>Finds the pupil inside each crop (3 detection modes) and keeps the iris landmark
+              as an independent signal.</li>
+          <li>Estimates head pose (yaw/pitch/roll) with <code>cv2.solvePnP</code> from 6 stable
+              landmarks against a 3D head model (~60° FOV pinhole camera).</li>
+          <li>Fuses both eyes by <b>quality weight</b> — never a plain average.</li>
+        </ul>
+        <p class="ref">gaze_core.py → EyeTracker, estimate_head_pose, build_feature_vector, fuse_eye_gazes</p>
+      </div>
+      <div class="card">
+        <h4>Pupil modes (<code>--pupil</code> / key <code>i</code>)</h4>
+        <ul>
+          <li><code>hybrid</code> (default) — image detection if confidence ≥ 0.6, else iris landmark.</li>
+          <li><code>iris</code> — trust MediaPipe iris centre (landmark 468/473) first.</li>
+          <li><code>image</code> — Otsu threshold + contour circle first, iris as fallback.</li>
+        </ul>
+        <h4 style="margin-top:14px">Feature vector (11 channels)</h4>
+        <ul>
+          <li><code>left/right_eye_x,y</code> — pupil offset vs aperture centre, normalized by aperture size.</li>
+          <li><code>left/right_iris_x,y</code> — pupil position inside the 200×100 crop (0…1); imputed to 0.5 if an eye is missing.</li>
+          <li><code>head_yaw, head_pitch, head_roll</code> — degrees ÷ 30 so all channels share a scale.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Head pose — what it does and does not fix</h4>
+        <ul>
+          <li>Reprojection error, angular plausibility (±60/50/45°) and frame-to-frame stability
+              are combined into a head-pose confidence.</li>
+          <li>Head pose is a feature of the mapping model, so orientation-related gaze error is
+              <b>compensated for in calibration</b>, not removed by assumption.</li>
+          <li>Head-pose compensation <b>reduces but does not eliminate</b> error from head
+              movement; measure it with the per-head-pose validation buckets.</li>
+        </ul>
+        <p class="ref">estimate_head_pose() → HeadPose(yaw, pitch, roll, confidence, reprojection_error)</p>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 1085 280" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif">
+        <defs>
+          <marker id="a1" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#38bdf8"/>
+          </marker>
+        </defs>
+        <g font-size="13">
+          <rect x="8" y="30" width="140" height="70" rx="10" fill="#1c2330" stroke="#38bdf8"/>
+          <text x="78" y="58" fill="#e6edf3" text-anchor="middle" font-weight="bold">Webcam frame</text>
+          <text x="78" y="80" fill="#9aa7b5" text-anchor="middle" font-size="11">BGR 1280×720, mirrored</text>
+
+          <rect x="185" y="30" width="150" height="70" rx="10" fill="#1c2330" stroke="#38bdf8"/>
+          <text x="260" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">MediaPipe</text>
+          <text x="260" y="72" fill="#e6edf3" text-anchor="middle" font-weight="bold">FaceMesh</text>
+          <text x="260" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">478 landmarks</text>
+
+          <rect x="382" y="30" width="160" height="70" rx="10" fill="#1c2330" stroke="#facc15"/>
+          <text x="462" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Eye templates</text>
+          <text x="462" y="72" fill="#e6edf3" text-anchor="middle" font-weight="bold">+ perspective warp</text>
+          <text x="462" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">quad → 200×100 rect</text>
+
+          <rect x="579" y="30" width="150" height="70" rx="10" fill="#1c2330" stroke="#facc15"/>
+          <text x="654" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Pupil select</text>
+          <text x="654" y="72" fill="#e6edf3" text-anchor="middle" font-weight="bold">hybrid/iris/image</text>
+          <text x="654" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">detection confidence</text>
+
+          <rect x="382" y="150" width="160" height="70" rx="10" fill="#1c2330" stroke="#c084fc"/>
+          <text x="462" y="174" fill="#e6edf3" text-anchor="middle" font-weight="bold">Head pose</text>
+          <text x="462" y="192" fill="#e6edf3" text-anchor="middle" font-weight="bold">solvePnP</text>
+          <text x="462" y="212" fill="#9aa7b5" text-anchor="middle" font-size="11">yaw / pitch / roll + conf</text>
+
+          <rect x="776" y="30" width="170" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="861" y="52" fill="#e6edf3" text-anchor="middle" font-weight="bold">Feature vector</text>
+          <text x="861" y="70" fill="#e6edf3" text-anchor="middle" font-weight="bold">+ eye fusion</text>
+          <text x="861" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">quality-weighted, 11 ch</text>
+
+          <rect x="972" y="30" width="105" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="1024" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">GazeResult</text>
+          <text x="1024" y="74" fill="#3ddc84" text-anchor="middle" font-size="11">features + pose</text>
+          <text x="1024" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">+ 5 confidences</text>
+        </g>
+        <g stroke="#38bdf8" stroke-width="2" marker-end="url(#a1)">
+          <line x1="148" y1="65" x2="181" y2="65"/>
+          <line x1="335" y1="65" x2="378" y2="65"/>
+          <line x1="542" y1="65" x2="575" y2="65"/>
+          <line x1="729" y1="65" x2="772" y2="65"/>
+          <line x1="946" y1="65" x2="968" y2="65"/>
+        </g>
+        <g stroke="#c084fc" stroke-width="2" marker-end="url(#a1)">
+          <line x1="260" y1="100" x2="260" y2="146"/>
+          <path d="M335,185 H861 V106" fill="none"/>
+        </g>
+        <g font-size="11" fill="#9aa7b5">
+          <text x="8" y="252">1. quad = expand([outer, top, inner, bottom], pad=1.25) → getPerspectiveTransform → warpPerspective(frame, (200,100))</text>
+          <text x="8" y="270">2. aperture = fillPoly(eye contour) → Otsu → open/close → findContours → circularity &amp; area score (bounds-checked)</text>
+          <text x="560" y="252">3. solvePnP(6 model pts) → Rodrigues → Euler angles + reprojection error → head-pose confidence</text>
+          <text x="560" y="270">4. fused = (L·q_L + R·q_R)/(q_L+q_R); rejected when q_L+q_R &lt; 0.12</text>
+        </g>
+      </svg>
+    </div>
+
+    <details>
+      <summary>Eye quality → fusion weight</summary>
+      <div class="body">
+        <p>Each eye gets a quality score in [0,1] used as its fusion weight:</p>
+        <p><code>quality = 0.35·pupil_conf + 0.15·contour_quality + 0.15·geometry + 0.15·contrast
+        + 0.10·temporal + 0.10·visibility</code>, scaled by <code>clip(head_pose_conf, 0.4, 1)</code>.</p>
+        <p>Missing pupil, degenerate aperture or an all-poor pair yields <code>None</code> instead of
+        a plausible-looking point, so the sample can be rejected downstream.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Hotkeys &amp; windows (phase1_eye_tracking.py)</summary>
+      <div class="body">
+        <table>
+          <tr><th>Key</th><th>Action</th></tr>
+          <tr><td><code>i</code></td><td>Cycle pupil mode hybrid → iris → image</td></tr>
+          <tr><td><code>m</code></td><td>Toggle full face-mesh tessellation overlay</td></tr>
+          <tr><td><code>h</code></td><td>Toggle HUD (gaze field box, bottom-left)</td></tr>
+          <tr><td><code>f</code></td><td>Toggle feature-vector panel</td></tr>
+          <tr><td><code>s</code></td><td>Save snapshot to <code>phase1_snapshot.jpg</code></td></tr>
+          <tr><td><code>q</code> / ESC</td><td>Quit</td></tr>
+        </table>
+        <p style="margin-top:10px">The HUD prints head pose
+        (<code>yaw/pitch/roll</code>), the five confidence components
+        (<code>pup / lm / hp / gz / tmp</code>) and the per-eye quality values.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ 3. PHASE 2 ============ -->
+  <section id="phase2">
+    <h2>3 · Phase 2 — Calibration &amp; gaze mapping <span class="tag">phase2_coordinate_mapping.py</span></h2>
+    <p class="sub">Map the feature vector to absolute pixels on a virtual 1920×1080 screen, with
+    outlier rejection and configurable EMA smoothing — then measure the result in validation mode.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h4>Two mapping paths</h4>
+        <ul>
+          <li><b>Raw (no calibration):</b> <code>x = (0.5 + (gx−base_x)·gain)·W</code> — gain 3.0,
+              baseline auto-centred over 45 warmup frames. Transparent baseline, not a model.</li>
+          <li><b>Calibrated:</b> a mapping model is fitted on
+              <code>Features → Known Screen Coordinate</code> samples and predicts from the full
+              11-channel vector.</li>
+          <li>Both clamp to screen bounds, then apply
+              <code>new = α·x + (1−α)·old</code> with <code>ema_alpha</code> (default 0.3).</li>
+        </ul>
+        <p class="ref">gaze_core.py → ScreenMapper, build_mapping_model</p>
+      </div>
+      <div class="card">
+        <h4>Mapping models (<code>--mapping</code>)</h4>
+        <ul>
+          <li><b>affine</b> — <code>X = a₁f₁+…+b₁</code>, least squares baseline (default).</li>
+          <li><b>polynomial</b> — second-order terms <code>x, y, x², y², xy, …</code> on standardized
+              features, light ridge (1e-2), including head-pose interactions.</li>
+          <li><b>mlp</b> — Dense(16) → tanh → Dense(2) in plain NumPy; optional, never mandatory.</li>
+          <li>Complexity is never presumed better: <code>--compare-models</code> measures all three
+              on the same validation features.</li>
+        </ul>
+        <p class="ref">AffineModel / PolynomialModel / MLPModel</p>
+      </div>
+      <div class="card">
+        <h4>Outlier rejection</h4>
+        <ul>
+          <li>Confidence &lt; <code>confidence_threshold</code> (0.5) → rejected.</li>
+          <li>Missing feature vector while calibrated → rejected.</li>
+          <li>Prediction outside the screen by &gt; 10 % margin → rejected.</li>
+          <li>Jump &gt; <code>outlier_max_jump_px</code> (default 1.5 × screen diagonal — beyond any
+              reachable on-screen jump) → rejected, so <b>real saccades are never rejected for being
+              fast</b>. Optional speed limit is off by default.</li>
+          <li>Every rejection is counted in <code>ScreenMapper.stats</code> → valid sample rate.</li>
+        </ul>
+        <p class="ref">ScreenMapper.map() · stats: accepted / rejected_low_confidence / rejected_off_screen / rejected_jump / rejected_missing_features</p>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 1085 265" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif">
+        <defs>
+          <marker id="a2" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#facc15"/>
+          </marker>
+        </defs>
+        <g font-size="13">
+          <rect x="8" y="30" width="150" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="83" y="56" fill="#e6edf3" text-anchor="middle" font-weight="bold">Feature vector</text>
+          <text x="83" y="76" fill="#9aa7b5" text-anchor="middle" font-size="11">11 ch from Phase 1</text>
+
+          <rect x="195" y="30" width="175" height="70" rx="10" fill="#1c2330" stroke="#fb923c"/>
+          <text x="282" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Calibrated?</text>
+          <text x="282" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">model from calibration.npz</text>
+          <text x="282" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">else raw gain + auto-centre</text>
+
+          <rect x="407" y="30" width="175" height="70" rx="10" fill="#1c2330" stroke="#fb923c"/>
+          <text x="494" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Mapping model</text>
+          <text x="494" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">affine | polynomial | MLP</text>
+          <text x="494" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">fitted least squares / ridge / Adam</text>
+
+          <rect x="619" y="30" width="175" height="70" rx="10" fill="#1c2330" stroke="#ff6b6b"/>
+          <text x="706" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Outlier rejection</text>
+          <text x="706" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">low conf · off-screen · jump</text>
+          <text x="706" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">counts → valid sample rate</text>
+
+          <rect x="831" y="30" width="160" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="911" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">EMA → clamp</text>
+          <text x="911" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">α = ema_alpha (0.3)</text>
+          <text x="911" y="90" fill="#9aa7b5" text-anchor="middle" font-size="11">pixel (X, Y) in bounds</text>
+
+          <rect x="195" y="155" width="796" height="85" rx="10" fill="#161b22" stroke="#c084fc"/>
+          <text x="593" y="180" fill="#c084fc" text-anchor="middle" font-weight="bold" font-size="12">Validation mode (--validate / [v])</text>
+          <text x="215" y="202" fill="#9aa7b5" font-size="11">display known targets → stabilize → collect predictions → error_px = √((pred−target)ₓ² + (pred−target)ᵧ²)</text>
+          <text x="215" y="220" fill="#9aa7b5" font-size="11">report: mean · median · std · p95 · max — overall, per target, and per head-pose condition (neutral / slight / moderate)</text>
+          <text x="215" y="237" fill="#9aa7b5" font-size="11">--compare-models refits affine / polynomial / MLP on the same data · angular error only with known screen &amp; camera geometry</text>
+        </g>
+        <g stroke="#facc15" stroke-width="2" marker-end="url(#a2)">
+          <line x1="158" y1="65" x2="191" y2="65"/>
+          <line x1="370" y1="65" x2="403" y2="65"/>
+          <line x1="582" y1="65" x2="615" y2="65"/>
+          <line x1="794" y1="65" x2="827" y2="65"/>
+          <line x1="911" y1="100" x2="911" y2="151" stroke="#c084fc"/>
+        </g>
+      </svg>
+    </div>
+
+    <details>
+      <summary>Hotkeys &amp; windows (phase2_coordinate_mapping.py)</summary>
+      <div class="body">
+        <table>
+          <tr><th>Key</th><th>Action</th></tr>
+          <tr><td><code>c</code></td><td>Start calibration (5 / 9 / 13 points per <code>--points</code>)</td></tr>
+          <tr><td><code>SPACE</code></td><td>Manually capture the current calibration target</td></tr>
+          <tr><td><code>v</code></td><td>Start validation run (writes JSON + CSV report)</td></tr>
+          <tr><td><code>m</code></td><td>Cycle mapping model affine → polynomial → mlp (refits existing samples)</td></tr>
+          <tr><td><code>r</code></td><td>Reset calibration (deletes calibration.npz)</td></tr>
+          <tr><td><code>n</code></td><td>Re-centre raw baseline (clears warmup)</td></tr>
+          <tr><td><code>q</code> / ESC</td><td>Quit</td></tr>
+        </table>
+        <p style="margin-top:10px">Two windows: <b>"webcam"</b> (overlay, 420 px) and the virtual
+        screen preview with grid, gaze trail and a cursor whose radius grows when confidence drops.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ 4. PHASE 3 ============ -->
+  <section id="phase3">
+    <h2>4 · Phase 3 — Fixation-aware gaze-density heatmap <span class="tag">phase3_attention_heatmap.py</span></h2>
+    <p class="sub">Mapped gaze samples are classified as fixation / saccade / invalid, accumulated
+    with confidence and fixation-duration weights, decayed in <b>time</b> (not per frame), blurred,
+    normalized, gamma-corrected and colourized. The baseline output is a <b>gaze-density heatmap</b>;
+    it becomes a visual-attention estimation component only because fixation duration and confidence
+    are folded into the weights.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h4>Fixation / saccade detection</h4>
+        <ul>
+          <li><b>I-DT</b> (default): a window stays a fixation while dispersion ≤ 45 px and duration
+              ≥ 100 ms.</li>
+          <li><b>I-VT</b> (<code>--fixation-method ivt</code>): velocity &lt; 1 px/ms (1000 px/s) is
+              stable, above it is movement.</li>
+          <li>Labels: <code>fixation</code>, <code>saccade</code>, <code>invalid</code> (missing or
+              below the confidence gate).</li>
+          <li>Each fixation stores start, end, duration, centroid, confidence, dispersion and sample
+              count; saccades store amplitude and peak velocity.</li>
+        </ul>
+        <p class="ref">EventDetector — fixation_events.json export on save / exit</p>
+      </div>
+      <div class="card">
+        <h4>Accumulation math</h4>
+        <ul>
+          <li>Grid cell = <b>4 px</b> → matrix shape <b>480 × 270</b> (1920/4 × 1080/4).</li>
+          <li><code>add(x, y, t)</code>: <code>grid += confidence × fixation_weight</code> —
+              fixation weight is <code>Δt × 10/s</code> (saccades × 0.1), so a 700 ms stable fixation
+              contributes ≈ 7.0 vs ≈ 0.1 for one noisy sample.</li>
+          <li>Samples below <code>heatmap_min_confidence</code> (0.35) are discarded, not
+              down-weighted equally.</li>
+          <li>Calibration and pause ([p]) suppress accumulation so dwell frames don't pollute the map.</li>
+        </ul>
+        <p class="ref">gaze_core.py → AttentionHeatmap.add()</p>
+      </div>
+      <div class="card">
+        <h4>Decay, blur and rendering</h4>
+        <ul>
+          <li><b>Time-based decay:</b> <code>grid *= exp(−Δt/τ)</code>, τ = 5 s — identical behaviour
+              at 30 fps and 60 fps (frame-based <code>×0.997</code> is gone).</li>
+          <li><b>Blur units:</b> σ = 45 <b>screen px</b> → <code>σ_cells = 45/4 = 11.25</code> →
+              kernel <code>2·round(3·11.25)+1 = 69</code>. The HUD shows both units.</li>
+          <li><b>Render:</b> normalize by peak → <code>pow(n, γ=0.75)</code> → TURBO colormap →
+              alpha blend (0.7) over the camera frame or a dark canvas.</li>
+        </ul>
+        <p class="ref">AttentionHeatmap — cell, decay_tau, gaussian_sigma_px, gamma, alpha all configurable</p>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <svg viewBox="0 0 1085 240" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif">
+        <defs>
+          <marker id="a3" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#3ddc84"/>
+          </marker>
+        </defs>
+        <g font-size="13">
+          <rect x="8" y="30" width="140" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="78" y="56" fill="#e6edf3" text-anchor="middle" font-weight="bold">pixel (X,Y)</text>
+          <text x="78" y="76" fill="#9aa7b5" text-anchor="middle" font-size="11">from Phase 2</text>
+
+          <rect x="185" y="30" width="165" height="70" rx="10" fill="#1c2330" stroke="#38bdf8"/>
+          <text x="267" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">I-DT / I-VT</text>
+          <text x="267" y="74" fill="#e6edf3" text-anchor="middle" font-weight="bold">fixation classifier</text>
+          <text x="267" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">fixation · saccade · invalid</text>
+
+          <rect x="387" y="30" width="165" height="70" rx="10" fill="#1c2330" stroke="#facc15"/>
+          <text x="469" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Weighted add</text>
+          <text x="469" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">conf × fixation × Δt</text>
+          <text x="469" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">gate: conf ≥ 0.35</text>
+
+          <rect x="589" y="30" width="165" height="70" rx="10" fill="#1c2330" stroke="#ff6b6b"/>
+          <text x="671" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">Time decay</text>
+          <text x="671" y="74" fill="#e6edf3" text-anchor="middle" font-weight="bold">grid *= exp(−Δt/τ)</text>
+          <text x="671" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">τ = 5 s, fps-independent</text>
+
+          <rect x="791" y="30" width="150" height="70" rx="10" fill="#1c2330" stroke="#facc15"/>
+          <text x="866" y="54" fill="#e6edf3" text-anchor="middle" font-weight="bold">GaussianBlur</text>
+          <text x="866" y="74" fill="#9aa7b5" text-anchor="middle" font-size="11">σ 45 px → 11.25 cells</text>
+          <text x="866" y="92" fill="#9aa7b5" text-anchor="middle" font-size="11">kernel 69</text>
+
+          <rect x="8" y="150" width="933" height="70" rx="10" fill="#1c2330" stroke="#3ddc84"/>
+          <text x="474" y="176" fill="#e6edf3" text-anchor="middle" font-weight="bold">normalize by peak → gamma (0.75) → TURBO colormap → alpha blend (0.7)</text>
+          <text x="474" y="198" fill="#9aa7b5" text-anchor="middle" font-size="11">output = gaze-density heatmap over camera frame or dark canvas · export: attention_points.npy · attention_grid.npy · fixation_events.json</text>
+        </g>
+        <g stroke="#3ddc84" stroke-width="2" marker-end="url(#a3)">
+          <line x1="148" y1="65" x2="181" y2="65"/>
+          <line x1="350" y1="65" x2="383" y2="65"/>
+          <line x1="552" y1="65" x2="585" y2="65"/>
+          <line x1="754" y1="65" x2="787" y2="65"/>
+          <line x1="866" y1="100" x2="866" y2="146"/>
+        </g>
+        <g font-size="11" fill="#9aa7b5">
+          <text x="966" y="60">HUD shows fps, X/Y,</text>
+          <text x="966" y="78">confidence, hits, peak,</text>
+          <text x="966" y="96">mapping mode, τ, σ in</text>
+          <text x="966" y="114">px and cells, grid size.</text>
+        </g>
+      </svg>
+    </div>
+
+    <details>
+      <summary>Hotkeys (phase3_attention_heatmap.py)</summary>
+      <div class="body">
+        <table>
+          <tr><th>Key</th><th>Action</th></tr>
+          <tr><td><code>p</code></td><td>Pause / resume accumulation</td></tr>
+          <tr><td><code>d</code></td><td>Toggle time-based decay (τ on/off)</td></tr>
+          <tr><td><code>r</code></td><td>Clear matrix, point log and fixation events</td></tr>
+          <tr><td><code>s</code></td><td>Save points + grid + fixation_events.json</td></tr>
+          <tr><td><code>v</code></td><td>Toggle raw matrix vs blurred view</td></tr>
+          <tr><td><code>c</code> / <code>SPACE</code></td><td>Calibration (same state machine as Phase 2)</td></tr>
+          <tr><td><code>n</code></td><td>Re-centre gaze baseline</td></tr>
+        </table>
+        <p style="margin-top:10px">Everything is auto-saved on exit in the <code>finally</code> block.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ 5. CONFIDENCE MODEL ============ -->
+  <section id="confidence">
+    <h2>5 · Confidence model <span class="tag">5 separate components</span></h2>
+    <p class="sub">There is no single generic confidence number. Five interpretable components are
+    computed separately and combined with explicit, configurable weights.</p>
+
+    <table>
+      <tr><th>Component</th><th>Meaning</th><th>How it is computed</th><th>Weight</th></tr>
+      <tr>
+        <td><code>pupil</code></td>
+        <td>Reliability of pupil/iris localization</td>
+        <td>Quality-weighted pupil detection confidence of the visible eyes</td>
+        <td>0.30</td>
+      </tr>
+      <tr>
+        <td><code>landmark</code></td>
+        <td>Stability / reliability of facial landmarks</td>
+        <td>Face size (inter-ocular distance vs frame) + frame-to-frame landmark stability</td>
+        <td>0.20</td>
+      </tr>
+      <tr>
+        <td><code>head_pose</code></td>
+        <td>Stability and plausibility of head pose</td>
+        <td>0.5·reprojection term + 0.3·angular plausibility + 0.2·temporal stability</td>
+        <td>0.15</td>
+      </tr>
+      <tr>
+        <td><code>gaze</code></td>
+        <td>Reliability of the combined gaze estimate</td>
+        <td>0.45·pupil + 0.25·landmark + 0.20·head pose + 0.10·two-eye completeness</td>
+        <td>0.25</td>
+      </tr>
+      <tr>
+        <td><code>temporal</code></td>
+        <td>Consistency with recent gaze estimates</td>
+        <td>Allowed displacement grows with Δt (<code>0.3 + 4·Δt</code>) so real saccades are not punished</td>
+        <td>0.10</td>
+      </tr>
+    </table>
+
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <h4>Combination</h4>
+        <p><code>combined = Σ(component × weight) / Σ(weights)</code> — weights live in
+        <code>GazeConfig.confidence_weights</code>. The full breakdown
+        (<code>pup / lm / hp / gz / tmp</code>) is printed in every HUD, so a low score can always be
+        traced to a cause instead of guessed at.</p>
+      </div>
+      <div class="card">
+        <h4>Where confidence is enforced</h4>
+        <ul>
+          <li>Calibration samples below 0.35 are rejected (and reset stabilization).</li>
+          <li>Screen mapping rejects samples below <code>confidence_threshold</code> (0.5).</li>
+          <li>Heatmap accumulation rejects samples below <code>heatmap_min_confidence</code> (0.35).</li>
+          <li>Eye fusion rejects when summed eye quality &lt; 0.12.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 6. CALIBRATION PROCEDURE ============ -->
+  <section id="calibration">
+    <h2>6 · Calibration procedure <span class="tag">5 / 9 / 13 points</span></h2>
+    <p class="sub">Calibration collects <code>Features → Known Screen Coordinate</code> pairs — not a
+    single frame per point. The 5-point layout stays available as a lightweight mode.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h4>Layouts</h4>
+        <ul>
+          <li><b>5 points</b> — 4 corners (8 %/92 %) + centre: lightweight legacy mode.</li>
+          <li><b>9 points</b> (default) — 3×3 grid at 10/50/90 %, centre visited first.</li>
+          <li><b>13 points</b> — the 9-point grid plus four inner-diamond targets for interior
+              coverage.</li>
+        </ul>
+        <p class="ref">--points · GazeConfig.calibration_points</p>
+      </div>
+      <div class="card">
+        <h4>Per-target parameters</h4>
+        <ul>
+          <li><code>calibration_stabilize_frames</code> = 12 — dwell before sampling starts.</li>
+          <li><code>calibration_samples_per_point</code> = 20 — accepted frames per target.</li>
+          <li><code>calibration_min_confidence</code> = 0.35 — low-confidence frames rejected.</li>
+          <li><code>calibration_outlier_z</code> = 3.0 — MAD-based z-score per target.</li>
+        </ul>
+      </div>
+    </div>
+
+    <ol class="steps">
+      <li><b>Display the target</b> — a ring with a progress arc appears at the known screen
+          coordinate.</li>
+      <li><b>Wait for stabilization</b> — 12 consecutive valid frames are required before any
+          sample is taken; a rejected frame resets the counter.</li>
+      <li><b>Collect multiple valid frames</b> — 20 samples per target (configurable), each with its
+          feature vector and confidence.</li>
+      <li><b>Reject low-confidence samples</b> — below 0.35 the frame never enters the dataset.</li>
+      <li><b>Reject extreme outliers</b> — MAD-based z-score (3.0) removes contaminated frames per
+          target.</li>
+      <li><b>Compute a robust median</b> — a median feature vector per target is stored as the
+          representative sample.</li>
+      <li><b>Store the dataset</b> — every accepted pair plus the model parameters are saved to
+          <code>calibration.npz</code> (screen size checked on reload).</li>
+    </ol>
+
+    <p class="sub" style="margin-top:14px"><code>SPACE</code> performs a manual capture of the current
+    target using whatever has been collected; <code>[r]</code> resets everything. A fit is refused if
+    there are fewer than 4 samples or if the feature spread is below
+    <code>min_calibration_span</code> (0.25) — degenerate data cannot produce a mapping.</p>
+  </section>
+
+  <!-- ============ 7. VALIDATION METHODOLOGY ============ -->
+  <section id="validation">
+    <h2>7 · Validation methodology <span class="tag">screen-space error</span></h2>
+    <p class="sub">Guided validation against known screen targets. The pipeline's accuracy is whatever
+    this mode measures on your setup — nothing in the codebase asserts otherwise.</p>
+
+    <ol class="steps">
+      <li><b>Show known targets</b> — a 5 / 9 / 13-point layout (defaults to the calibration layout).</li>
+      <li><b>Stabilize, then sample</b> — after a dwell period, predictions are collected
+          (<code>--validation-samples</code>, default 15 per target); low-confidence frames are logged
+          as invalid instead of recorded.</li>
+      <li><b>Per-record error</b> —
+          <code>error_px = √((predicted_x − target_x)² + (predicted_y − target_y)²)</code>.</li>
+      <li><b>Aggregate</b> — mean, median, standard deviation, 95th percentile and maximum, overall,
+          <b>per target</b>, and <b>per head-pose condition</b> (neutral ≤ 8°, slight ≤ 20°,
+          moderate above).</li>
+      <li><b>Export</b> — <code>evaluation_report.json</code> + <code>.csv</code>, plus
+          <code>evaluation_report_pairs.npz</code> (raw targets/predictions) for offline analysis.</li>
+    </ol>
+
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <h4>Comparisons supported</h4>
+        <ul>
+          <li><b>Raw / baseline vs calibrated</b> — validate once without a calibration file, once
+              after calibrating, then compare the two reports.</li>
+          <li><b>Affine vs polynomial vs MLP</b> — <code>--compare-models</code> refits all three on
+              the stored calibration samples and evaluates each on the identical validation features.</li>
+        </ul>
+        <p>No winner is declared without measured data; the report simply records what each model did.</p>
+      </div>
+      <div class="card">
+        <h4>Angular error (optional)</h4>
+        <p>When the physical geometry is known — <code>--screen-width-cm</code> and
+        <code>--camera-distance-cm</code> — the mean pixel error is converted to degrees:</p>
+        <p><code>theta = atan(error_px * cm_per_px / distance_cm)</code></p>
+        <p>If either value is missing, angular error is <b>not reported</b>; it is never computed from
+        guessed numbers.</p>
+      </div>
+      <div class="card">
+        <h4>Head-pose conditions</h4>
+        <p>Errors are bucketed by measured yaw/pitch (neutral / slight / moderate / unknown), so the
+        effect of head-pose compensation can be <b>measured rather than assumed</b>. Report these
+        buckets before and after enabling head-pose features to quantify any benefit.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 8. EVALUATION METRICS ============ -->
+  <section id="metrics">
+    <h2>8 · Evaluation metrics <span class="tag">JSON + CSV report</span></h2>
+    <p class="sub">The structured evaluation report written by Phase 2
+    (<code>--report-prefix</code>, default <code>evaluation_report</code>).</p>
+
+    <table>
+      <tr><th>Field</th><th>Meaning</th></tr>
+      <tr><td><code>model</code></td><td>Mapping model used (affine / polynomial / mlp, or the raw-gain baseline)</td></tr>
+      <tr><td><code>calibration_method</code></td><td>e.g. "9-point multi-sample"</td></tr>
+      <tr><td><code>number_of_calibration_points</code></td><td>Layout size (5 / 9 / 13)</td></tr>
+      <tr><td><code>samples_per_point</code></td><td>Accepted calibration frames per target</td></tr>
+      <tr><td><code>mean_error_px</code> · <code>median_error_px</code> · <code>standard_deviation_px</code> · <code>p95_error_px</code> · <code>max_error_px</code></td>
+          <td>Screen-space error statistics in pixels</td></tr>
+      <tr><td><code>valid_sample_rate</code></td><td>Accepted ÷ attempted samples (rejections are visible, not hidden)</td></tr>
+      <tr><td><code>average_confidence</code></td><td>Mean combined confidence of recorded samples</td></tr>
+      <tr><td><code>recorded_samples</code> · <code>attempts</code></td><td>Sample counts behind the statistics</td></tr>
+      <tr><td><code>per_target_error_px</code></td><td>Error statistics broken down per calibration target</td></tr>
+      <tr><td><code>error_by_head_pose_px</code></td><td>Error statistics per head-pose condition</td></tr>
+      <tr><td><code>angular_error_degrees</code></td><td>Only present when display/camera geometry was supplied</td></tr>
+      <tr><td><code>model_comparison</code></td><td>Side-by-side error statistics for affine / polynomial / MLP</td></tr>
+      <tr><td><code>config</code></td><td>The configuration used, so the run can be reproduced</td></tr>
+    </table>
+
+    <p class="sub" style="margin-top:14px">Phase 3 adds the optional behavioural metrics to
+    <code>fixation_events.json</code>: fixation detection rate, average / median fixation duration,
+    and saccade count.</p>
+  </section>
+
+  <!-- ============ 9. CONFIGURATION ============ -->
+  <section id="config">
+    <h2>9 · Configuration parameters <span class="tag">GazeConfig</span></h2>
+    <p class="sub">Everything lives in one dataclass in <code>gaze_core.py</code>; CLI flags mirror
+    these (<code>--help</code> on any phase). Defaults are the values the original implementation used
+    where they existed.</p>
+
+    <table>
+      <tr><th>Group</th><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
+      <tr><td rowspan="2">Display</td><td><code>screen_width</code>, <code>screen_height</code></td><td>1920, 1080</td><td>Virtual screen size</td></tr>
+      <tr><td><code>mapping_model</code></td><td>affine</td><td>affine | polynomial | mlp</td></tr>
+      <tr><td rowspan="4">Calibration</td><td><code>calibration_points</code></td><td>9</td><td>5 / 9 / 13 target layout</td></tr>
+      <tr><td><code>calibration_samples_per_point</code></td><td>20</td><td>Accepted frames per target</td></tr>
+      <tr><td><code>calibration_stabilize_frames</code></td><td>12</td><td>Dwell before sampling</td></tr>
+      <tr><td><code>calibration_min_confidence</code> / <code>calibration_outlier_z</code></td><td>0.35 / 3.0</td><td>Confidence gate / MAD outlier z-score</td></tr>
+      <tr><td rowspan="3">Smoothing &amp; outliers</td><td><code>ema_alpha</code></td><td>0.3</td><td>EMA factor (1 = off)</td></tr>
+      <tr><td><code>confidence_threshold</code></td><td>0.5</td><td>Sample rejection gate</td></tr>
+      <tr><td><code>outlier_max_jump_px</code> / <code>outlier_max_speed_px_s</code></td><td>0.0 (auto) / 0.0</td><td>1.5 × diagonal by default / speed limit disabled</td></tr>
+      <tr><td rowspan="2">Eye fusion</td><td><code>min_total_eye_quality</code></td><td>0.12</td><td>Fusion rejection floor</td></tr>
+      <tr><td><code>temporal_confidence_tau_s</code></td><td>0.35</td><td>Temporal confidence time constant</td></tr>
+      <tr><td rowspan="5">Heatmap</td><td><code>heatmap_cell_size</code></td><td>4 px</td><td>Grid resolution → 480×270 grid</td></tr>
+      <tr><td><code>heatmap_decay_tau</code></td><td>5.0 s</td><td>Time-decay constant (0 disables)</td></tr>
+      <tr><td><code>gaussian_sigma_px</code></td><td>45.0 px</td><td>Blur σ in screen pixels (÷ cell = cells)</td></tr>
+      <tr><td><code>heatmap_gamma</code> / <code>heatmap_alpha</code></td><td>0.75 / 0.7</td><td>Gamma correction / overlay opacity</td></tr>
+      <tr><td><code>heatmap_min_confidence</code></td><td>0.35</td><td>Accumulation confidence gate</td></tr>
+      <tr><td rowspan="3">Fixation</td><td><code>fixation_method</code></td><td>idt</td><td>idt | ivt</td></tr>
+      <tr><td><code>fixation_dispersion_px</code> / <code>fixation_min_duration_ms</code></td><td>45 px / 100 ms</td><td>I-DT thresholds</td></tr>
+      <tr><td><code>saccade_velocity_threshold</code></td><td>1.0 px/ms</td><td>Velocity threshold (1000 px/s)</td></tr>
+      <tr><td rowspan="4">Mapping extras</td><td><code>polynomial_ridge</code></td><td>1e-2</td><td>Ridge term for polynomial fit</td></tr>
+      <tr><td><code>mlp_hidden</code> / <code>mlp_epochs</code> / <code>mlp_learning_rate</code></td><td>16 / 400 / 5e-3</td><td>Optional MLP</td></tr>
+      <tr><td><code>random_seed</code></td><td>7</td><td>Reproducible MLP init</td></tr>
+      <tr><td><code>confidence_weights</code></td><td>.30/.20/.15/.25/.10</td><td>Confidence combination (pupil/landmark/head/gaze/temporal)</td></tr>
+    </table>
+  </section>
+
+  <!-- ============ 10. LIMITATIONS ============ -->
+  <section id="limitations">
+    <h2>10 · Limitations <span class="tag">read this before trusting a number</span></h2>
+    <p class="sub">The pipeline's accuracy depends on conditions the algorithm does not control.
+    Research-grade accuracy must never be claimed without measured validation on the target setup.</p>
+
+    <div class="grid">
+      <div class="card"><h4>Camera position</h4><p>A webcam below the screen forces an unfavorable
+      gaze/camera geometry; the ~60° FOV pinhole model is an approximation, not a calibrated intrinsics
+      estimate.</p></div>
+      <div class="card"><h4>Lighting</h4><p>Low light, backlighting and glare degrade pupil detection
+      and landmark stability; infrared would be more robust than visible light.</p></div>
+      <div class="card"><h4>Glasses / reflections</h4><p>Specular reflections can be mistaken for the
+      pupil and occlude the iris; the contour-quality term mitigates but does not remove this.</p></div>
+      <div class="card"><h4>Eye shape &amp; anatomy</h4><p>Eyelid shape, monolid eyes, makeup,
+      eyelashes and contact lenses change the eye aperture and the apparent pupil position.</p></div>
+      <div class="card"><h4>Head movement</h4><p>Head-pose compensation reduces but does not eliminate
+      error from head movement and camera-relative orientation.</p></div>
+      <div class="card"><h4>Face occlusion</h4><p>Hands, hair or objects over the face drop landmark
+      confidence and can invalidate frames entirely.</p></div>
+      <div class="card"><h4>Webcam resolution</h4><p>A 200×100 crop carved from a 720p frame limits
+      pupil precision; low frame rates reduce fixation and temporal-confidence resolution.</p></div>
+      <div class="card"><h4>Monitor geometry</h4><p>Second monitors, unusual scaling or a preview that
+      is not the assumed virtual screen break the pixel mapping; angular error needs real physical
+      geometry.</p></div>
+      <div class="card"><h4>Calibration quality</h4><p>Sparse, rushed or low-confidence calibration
+      produces an inaccurate mapping regardless of the model chosen.</p></div>
+      <div class="card"><h4>Individual variation</h4><p>All thresholds (dispersion, confidence gates,
+      quality weights) are heuristics tuned on generic data and may need re-tuning per person.</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 11. INTERACTIVE DEMONSTRATION ============ -->
+  <section id="demo">
+    <h2>11 · Interactive demonstration <span class="tag">Interactive Conceptual Simulation</span></h2>
+    <p class="sub"><b>Phase 2–3 Visualization Demo.</b> A small JavaScript simulation of the mapping
+    and heatmap concepts so you can feel the effect of gain, smoothing, calibration and decay.</p>
+
+    <div class="demo">
+      <div class="demo-note">
+        <b>This is a conceptual simulation, not the eye tracker.</b>
+        Your mouse position is treated as simulated gaze — no camera, face, pupil or head pose is
+        involved. The math here is deliberately simplified: per-frame decay instead of
+        <code>exp(−Δt/τ)</code>, a box blur instead of a true Gaussian, a single-frame 5-point
+        calibration instead of the multi-sample 5/9/13-point procedure, and no fixation detection,
+        confidence model or outlier rejection. The real pipeline is the Python code in
+        <code>phase1/2/3</code>. <b>Nothing in this demo validates the Python gaze-estimation
+        pipeline.</b>
+      </div>
+
+      <div class="demo-row">
+        <div class="demo-controls">
+          <label>Gain (raw mapping) <span class="val" id="gainV">3.0</span></label>
+          <input type="range" id="gain" min="1" max="8" step="0.1" value="3">
+
+          <label>Smoothing α (1 = off) <span class="val" id="smoothV">0.30</span></label>
+          <input type="range" id="smooth" min="0.05" max="1" step="0.05" value="0.3">
+
+          <label>Decay per frame (simulation) <span class="val" id="decayV">0.997</span></label>
+          <input type="range" id="decay" min="0.95" max="1" step="0.001" value="0.997">
+
+          <label>Heatmap σ (px) <span class="val" id="sigmaV">45</span></label>
+          <input type="range" id="sigma" min="10" max="120" step="5" value="45">
+
+          <div class="btnrow">
+            <button class="primary" id="calBtn">Run simulated 5-pt calibration</button>
+            <button id="centerBtn">Re-centre baseline</button>
+            <button id="resetBtn">Reset heatmap</button>
+          </div>
+        </div>
+        <div class="demo-out" id="log">conceptual simulation log…
+move the mouse over the canvas →</div>
+      </div>
+      <canvas id="heatCanvas" width="960" height="420"></canvas>
+    </div>
+  </section>
+
+  <!-- ============ 12. RESEARCH METHODOLOGY NOTES ============ -->
+  <section id="methodology">
+    <h2>12 · Research methodology notes <span class="tag">integrity</span></h2>
+    <div class="grid">
+      <div class="card">
+        <h4>How to make an accuracy claim</h4>
+        <ul>
+          <li>Run validation on the target hardware — the offline test suite checks algorithm
+              behaviour on synthetic data, not accuracy.</li>
+          <li>Report the configuration with the number: model, calibration layout, samples per point
+              and the rejection counts are all written into the JSON report.</li>
+          <li>Quote valid sample rate next to error: a low error on 5 % of frames is not a result.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Comparing fairly</h4>
+        <ul>
+          <li>Evaluate affine / polynomial / MLP on the <b>same</b> validation features
+              (<code>--compare-models</code>).</li>
+          <li>Compare raw vs calibrated by running validation twice, not by intuition.</li>
+          <li>A more complex model is never presumed better — measured error decides.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Measuring head-pose compensation</h4>
+        <ul>
+          <li>Errors are bucketed by measured yaw/pitch (neutral / slight / moderate).</li>
+          <li>Run the same session with and without head-pose channels to quantify the effect rather
+              than assuming it.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Terminology discipline</h4>
+        <ul>
+          <li>Baseline output = <b>gaze-density heatmap</b>.</li>
+          <li><b>Visual attention estimation</b> only when fixation duration + confidence weighting
+              are actually applied.</li>
+          <li>"Pupil/iris and facial features are inputs to a calibrated gaze-estimation model" —
+              never "the pupil position shows where the user is looking".</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>What has been verified here</h4>
+        <ul>
+          <li>52 offline tests pass (head pose recovery, fusion, calibration, all three mapping
+              models, fixation detection, time-based decay, σ unit conversion, reports, and a
+              synthetic end-to-end Phase 1 run).</li>
+          <li>All three CLIs start and parse arguments; <code>pyflakes</code> is clean.</li>
+          <li><b>Not verified here:</b> live webcam capture, real-face pupil behaviour and live
+              on-screen sessions — no camera was available in the development environment.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>What is deliberately not claimed</h4>
+        <ul>
+          <li>No "research-grade accuracy" — no measured before/after experiment is shipped with the
+              repository.</li>
+          <li>No elimination of head-movement, lighting or anatomy effects — only mitigation.</li>
+          <li>No validation of the Python pipeline by the JavaScript demo.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>attention-track-eye · process explainer · open this file in any browser (no server needed)</footer>
+
+<script>
+function go(id){document.getElementById(id).scrollIntoView({behavior:"smooth"});}
+
+/* ---------- controls ---------- */
+const $=id=>document.getElementById(id);
+const gain=$("gain"),smooth=$("smooth"),decay=$("decay"),sigma=$("sigma");
+gain.oninput=()=>$("gainV").textContent=(+gain.value).toFixed(1);
+smooth.oninput=()=>$("smoothV").textContent=(+smooth.value).toFixed(2);
+decay.oninput=()=>$("decayV").textContent=(+decay.value).toFixed(3);
+sigma.oninput=()=>$("sigmaV").textContent=sigma.value;
+
+/* ---------- conceptual simulation (mouse = simulated gaze) ---------- */
+const cv=$("heatCanvas"),ctx=cv.getContext("2d");
+const GW=120,GH=53;                    // grid cells (like 4px cells on 960x420)
+const grid=new Float32Array(GW*GH);
+let smoothed=null, baseline={x:.5,y:.5}, warm=null, calibrated=false;
+let affine=null, gaze={x:.5,y:.5}, cursor=null, target=null, dwell=0, calIndex=0, calSamples=[];
+const TARGETS=[[.08,.08],[.92,.08],[.92,.92],[.08,.92],[.5,.5]];
+const noise=()=> (Math.random()+Math.random()+Math.random()-1.5)/1.5*0.012;
+
+function logLine(s){const l=$("log");l.textContent=s+"\n"+l.textContent.split("\n").slice(0,14).join("\n");}
+
+cv.addEventListener("mousemove",e=>{
+  const r=cv.getBoundingClientRect();
+  gaze.x=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
+  gaze.y=Math.min(1,Math.max(0,(e.clientY-r.top)/r.height));
+});
+
+$("centerBtn").onclick=()=>{baseline={...gaze};warm=null;logLine("▸ baseline re-centred at "+gaze.x.toFixed(2)+","+gaze.y.toFixed(2));};
+$("resetBtn").onclick=()=>{grid.fill(0);logLine("▸ heatmap matrix cleared");};
+$("calBtn").onclick=()=>{calibrated=false;affine=null;calSamples=[];calIndex=0;dwell=0;target=TARGETS[0];
+  logLine("▸ simulated calibration started — hold the pointer on each dot (or click the canvas)");};
+
+cv.addEventListener("click",()=>{ if(target){calSamples.push({g:{...gaze},t:target});nextTarget();} });
+
+function nextTarget(){
+  calIndex++;dwell=0;
+  if(calIndex>=TARGETS.length){
+    target=null;
+    if(calSamples.length>=4){
+      // simple least-squares affine fit (same idea as np.linalg.lstsq)
+      affine=fitAffine(calSamples);calibrated=true;
+      logLine("▸ simulated affine 2x3 fitted (the Python pipeline fits on multi-sample features)");
+    }
+    return;
+  }
+  target=TARGETS[calIndex];
+  logLine("▸ target "+(calIndex+1)+"/5 at ("+target[0]+","+target[1]+")");
+}
+
+function fitAffine(s){
+  // solve per-axis  [gx gy 1] * [a b c]^T = target  via normal equations (3x3)
+  let S=[[0,0,0],[0,0,0],[0,0,0]],bx=[0,0,0],by=[0,0,0];
+  for(const s0 of s){
+    const v=[s0.g.x,s0.g.y,1];
+    for(let i=0;i<3;i++){bx[i]+=v[i]*s0.t[0];by[i]+=v[i]*s0.t[1];
+      for(let j=0;j<3;j++)S[i][j]+=v[i]*v[j];}
+  }
+  const solve=(b)=>{
+    const A=S.map((r,i)=>[...r,b[i]]);
+    for(let i=0;i<3;i++){
+      let p=i;for(let k=i+1;k<3;k++)if(Math.abs(A[k][i])>Math.abs(A[p][i]))p=k;
+      [A[i],A[p]]=[A[p],A[i]];
+      for(let k=i+1;k<3;k++){const f=A[k][i]/A[i][i];for(let j=i;j<4;j++)A[k][j]-=f*A[i][j];}
+    }
+    const x=[0,0,0];
+    for(let i=2;i>=0;i--){let s0=A[i][3];for(let j=i+1;j<3;j++)s0-=A[i][j]*x[j];x[i]=s0/A[i][i];}
+    return x;
+  };
+  return {a:solve(bx),b:solve(by)};
+}
+
+function mapGaze(g){
+  let x,y;
+  if(calibrated&&affine){
+    x=affine.a[0]*g.x+affine.a[1]*g.y+affine.a[2];
+    y=affine.b[0]*g.x+affine.b[1]*g.y+affine.b[2];
+  }else{
+    x=0.5+(g.x-baseline.x)*(+gain.value);
+    y=0.5+(g.y-baseline.y)*(+gain.value);
+    x*=cv.width;y*=cv.height;
+  }
+  x=Math.min(cv.width-1,Math.max(0,x));
+  y=Math.min(cv.height-1,Math.max(0,y));
+  const a=+smooth.value;
+  smoothed=smoothed?{x:a*x+(1-a)*smoothed.x,y:a*y+(1-a)*smoothed.y}:{x,y};
+  return smoothed;
+}
+
+function step(){
+  // calibration dwell logic (simplified stand-in for ScreenCalibrator.update)
+  if(target){
+    const dx=Math.abs(gaze.x-target[0]),dy=Math.abs(gaze.y-target[1]);
+    if(dx<=0.1&&dy<=0.1){dwell++;
+      if(dwell>=10){calSamples.push({g:{...gaze},t:target});nextTarget();}
+    }else dwell=0;
+  }
+  const p=mapGaze(gaze);
+  cursor=p;
+  // accumulate
+  const col=Math.min(GW-1,Math.max(0,Math.floor(p.x/cv.width*GW)));
+  const row=Math.min(GH-1,Math.max(0,Math.floor(p.y/cv.height*GH)));
+  if(!target) grid[row*GW+col]+=1;
+  // decay (simulation uses a per-frame factor; Python uses exp(-dt/tau))
+  const d=+decay.value;
+  if(d<1) for(let i=0;i<grid.length;i++) grid[i]*=d;
+  render(p);
+  requestAnimationFrame(step);
+}
+
+function render(p){
+  ctx.fillStyle="#111";ctx.fillRect(0,0,cv.width,cv.height);
+  // grid lines (phase2 style)
+  ctx.strokeStyle="rgba(255,255,255,.05)";ctx.lineWidth=1;
+  for(let x=0;x<cv.width;x+=80){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,cv.height);ctx.stroke();}
+  for(let y=0;y<cv.height;y+=70){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cv.width,y);ctx.stroke();}
+  // heatmap: box-blur approximation of GaussianBlur
+  const s=+sigma.value, r=Math.max(1,Math.round(s/8));
+  const cellW=cv.width/GW,cellH=cv.height/GH;
+  let peak=1e-6;
+  for(let i=0;i<grid.length;i++) if(grid[i]>peak)peak=grid[i];
+  for(let row=0;row<GH;row++){
+    for(let col=0;col<GW;col++){
+      let sum=0,n=0;
+      for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+        const rr=row+dy,cc=col+dx;
+        if(rr<0||cc<0||rr>=GH||cc>=GW)continue;
+        sum+=grid[rr*GW+cc];n++;
+      }
+      const v=Math.pow(Math.min(1,(sum/n)/peak),0.75);
+      if(v<=0.004)continue;
+      ctx.fillStyle=turbo(v);
+      ctx.globalAlpha=0.7*v;
+      ctx.fillRect(col*cellW,row*cellH,cellW+1,cellH+1);
+    }
+  }
+  ctx.globalAlpha=1;
+  // calibration target
+  if(target){
+    const tx=target[0]*cv.width,ty=target[1]*cv.height;
+    ctx.strokeStyle="#fff";ctx.lineWidth=3;ctx.beginPath();ctx.arc(tx,ty,26,0,7);ctx.stroke();
+    ctx.fillStyle="#ff0";ctx.beginPath();ctx.arc(tx,ty,9,0,7);ctx.fill();
+    ctx.strokeStyle="#0f0";ctx.lineWidth=4;
+    ctx.beginPath();ctx.arc(tx,ty,26,-Math.PI/2,-Math.PI/2+2*Math.PI*(dwell/10));ctx.stroke();
+    ctx.fillStyle="#fff";ctx.font="14px sans-serif";ctx.fillText("look here  "+(calIndex+1)+"/5",tx-48,ty+48);
+  }
+  // cursor (phase2 style)
+  if(p){
+    ctx.strokeStyle="rgba(0,140,220,.8)";ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(p.x,0);ctx.lineTo(p.x,cv.height);
+    ctx.moveTo(0,p.y);ctx.lineTo(cv.width,p.y);ctx.stroke();
+    ctx.fillStyle="#fc0";ctx.beginPath();ctx.arc(p.x,p.y,10,0,7);ctx.fill();
+    ctx.strokeStyle="#f80";ctx.lineWidth=2;ctx.beginPath();ctx.arc(p.x,p.y,16,0,7);ctx.stroke();
+  }
+  ctx.fillStyle="#38bdf8";ctx.font="13px Consolas,monospace";
+  ctx.fillText((calibrated?"simulated affine":"raw gain="+ (+gain.value).toFixed(1))+
+    "   X="+(p?p.x.toFixed(1):"----")+"  Y="+(p?p.y.toFixed(1):"----")+
+    "   grid="+GW+"x"+GH+"  decay/f="+(+decay.value).toFixed(3),12,20);
+}
+function turbo(t){
+  t=Math.min(1,Math.max(0,t));
+  const stops=[[48,18,59],[70,109,255],[42,226,195],[255,255,77],[255,127,13],[122,4,3]];
+  const x=t*(stops.length-1),i=Math.min(stops.length-2,Math.floor(x)),f=x-i;
+  const c=stops[i].map((v,k)=>Math.round(v+(stops[i+1][k]-v)*f));
+  return "rgb("+c.join(",")+")";
+}
+logLine("▸ conceptual simulation of Phase 2 mapping + Phase 3 heatmap (mouse = simulated gaze)");
+step();
+</script>
+</body>
+</html>
