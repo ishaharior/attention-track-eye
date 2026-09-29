@@ -46,7 +46,14 @@ from phase2_coordinate_mapping import (
     save_report,
     summarize_validation,
 )
-from phase3_attention_heatmap import EventDetector
+from phase3_attention_heatmap import (
+    MATRIX_BOTTOM,
+    MATRIX_LEFT,
+    MATRIX_RIGHT,
+    MATRIX_TOP,
+    EventDetector,
+    draw_matrix,
+)
 
 
 SCREEN = (1920, 1080)
@@ -564,6 +571,122 @@ class TestHeatmap(unittest.TestCase):
         heat.reset()
         self.assertEqual(heat.total_hits, 0)
         self.assertEqual(float(heat.grid.sum()), 0.0)
+
+
+class TestMatrixView(unittest.TestCase):
+    """Phase 3's accumulation-matrix window: stable scale + screen coordinates."""
+
+    @staticmethod
+    def _scale(heat) -> int:
+        return max(1, min(3, 1000 // heat.grid_w))
+
+    @staticmethod
+    def _region(panel, heat, scale: int) -> np.ndarray:
+        return panel[
+            MATRIX_TOP: MATRIX_TOP + heat.grid_h * scale,
+            MATRIX_LEFT: MATRIX_LEFT + heat.grid_w * scale,
+        ]
+
+    @staticmethod
+    def _index(panel, heat, scale: int, row: int, col: int) -> int:
+        """Recover the colormap index rendered at the centre of one grid cell."""
+        lut = cv2.applyColorMap(
+            np.arange(256, dtype=np.uint8).reshape(1, -1), heat.colormap
+        )[0].astype(int)
+        px = panel[MATRIX_TOP + row * scale + scale // 2, MATRIX_LEFT + col * scale + scale // 2].astype(int)
+        return int(np.argmin(np.abs(lut - px).sum(1)))
+
+    @staticmethod
+    def _heat():
+        from gaze_core import AttentionHeatmap
+
+        heat = AttentionHeatmap(*SCREEN, min_confidence=0.0)
+        # written directly so the fixtures do not depend on the add() weighting rules
+        heat.grid[50, 40] = 10.0  # weak structure far below the session peak
+        heat.grid[135, 240] = 1000.0  # the peak cell
+        return heat
+
+    def test_panel_layout_carries_axes_and_labels(self):
+        heat = self._heat()
+        panel = draw_matrix(heat, False, None, 0.0)
+        scale = self._scale(heat)
+
+        self.assertEqual(panel.dtype, np.uint8)
+        self.assertEqual(panel.ndim, 3)
+        self.assertEqual(
+            panel.shape,
+            (
+                heat.grid_h * scale + MATRIX_TOP + MATRIX_BOTTOM,
+                heat.grid_w * scale + MATRIX_LEFT + MATRIX_RIGHT,
+                3,
+            ),
+        )
+        # header text above the grid, y-axis labels at the left, x-axis below
+        self.assertGreater(int(panel[:MATRIX_TOP].max()), 100)
+        self.assertGreater(
+            int(panel[MATRIX_TOP:MATRIX_TOP + heat.grid_h * scale, :MATRIX_LEFT].max()), 100
+        )
+        self.assertGreater(int(panel[MATRIX_TOP + heat.grid_h * scale:, :].max()), 100)
+
+    def test_session_reference_replaces_per_frame_normalisation(self):
+        heat = self._heat()
+        scale = self._scale(heat)
+        at_peak = draw_matrix(heat, False, None, 1000.0)
+        below_peak = draw_matrix(heat, False, None, 1.0e6)
+
+        # a cell two orders of magnitude below the peak stays visible, where the
+        # old per-frame linear scaling rendered it at ~2/255 (effectively black)
+        self.assertGreaterEqual(self._index(at_peak, heat, scale, 50, 40), 50)
+
+        # raising the reference dims every cell instead of re-stretching to 255
+        self.assertLess(self._index(below_peak, heat, scale, 135, 240),
+                        self._index(at_peak, heat, scale, 135, 240))
+        self.assertLess(self._index(below_peak, heat, scale, 50, 40),
+                        self._index(at_peak, heat, scale, 50, 40))
+
+    def test_blur_view_shares_the_reference_and_does_not_clip(self):
+        heat = self._heat()
+        scale = self._scale(heat)
+        raw = draw_matrix(heat, False, None, 1000.0)
+        blurred = draw_matrix(heat, True, None, 1000.0)
+
+        self.assertFalse(np.array_equal(raw, blurred))
+        # Gaussian smoothing cannot raise the peak, so against one shared
+        # reference the blurred view must sit below the raw peak, never clip
+        self.assertLess(self._index(blurred, heat, scale, 135, 240),
+                        self._index(raw, heat, scale, 135, 240))
+
+    def test_gaze_crosshair_marks_the_current_cell(self):
+        heat = self._heat()
+        scale = self._scale(heat)
+        still = draw_matrix(heat, False, None, 1000.0)
+        tracked = draw_matrix(heat, False, (960.0, 540.0), 1000.0)
+        self.assertFalse(np.array_equal(still, tracked))
+
+        col = int(960.0 / heat.cell)
+        row = int(540.0 / heat.cell)
+        probe_row = MATRIX_TOP + row * scale + scale // 2
+        probe_col = MATRIX_LEFT + col * scale + scale // 2
+        far_x = MATRIX_LEFT + heat.grid_w * scale - 10  # empty cells, right of the peak
+        far_y = MATRIX_TOP + heat.grid_h * scale - 10
+
+        # white crosshair across the view where the data is dark
+        self.assertGreater(int(tracked[probe_row, far_x].sum()), 600)
+        self.assertLess(int(still[probe_row, far_x].sum()), 200)
+        self.assertGreater(int(tracked[far_y, probe_col].sum()), 600)
+        self.assertLess(int(still[far_y, probe_col].sum()), 200)
+
+    def test_empty_matrix_stays_uniform_but_labelled(self):
+        from gaze_core import AttentionHeatmap
+
+        heat = AttentionHeatmap(*SCREEN, min_confidence=0.0)
+        panel = draw_matrix(heat, True, None, 0.0)
+        scale = self._scale(heat)
+        region = self._region(panel, heat, scale)
+        # a sample block clear of the axis frame and the quarter gridlines
+        block = region[10:130, 10:230]
+        self.assertTrue(np.all(block == block.reshape(-1, 3)[0]))
+        self.assertGreater(int(panel[:MATRIX_TOP].max()), 100)
 
 
 class TestValidation(unittest.TestCase):

@@ -220,13 +220,13 @@
           <li><code>phase1_eye_tracking.py</code> (210) — live eye / head-pose feature view.</li>
           <li><code>phase2_coordinate_mapping.py</code> (890) — calibration, mapping, validation,
               evaluation reports.</li>
-          <li><code>phase3_attention_heatmap.py</code> (713) — fixation detection, accumulation,
+          <li><code>phase3_attention_heatmap.py</code> (869) — fixation detection, accumulation,
               decay, rendering, export.</li>
           <li><code>web_app.py</code> (675) — Flask server: sessions, frame loop, calibration,
               grid refit, heatmap report.</li>
           <li><code>web_interface.html</code> (971) — browser UI: upload, webcam, calibration,
               live gaze dot, grid overlay, report.</li>
-          <li><code>test_gaze_pipeline.py</code> (829) — 52 offline pipeline tests, no webcam.</li>
+          <li><code>test_gaze_pipeline.py</code> (952) — 57 offline pipeline tests, no webcam.</li>
           <li><code>test_webapp.py</code> (376) — 16 headless browser-interface tests, no webcam.</li>
         </ul>
       </div>
@@ -239,7 +239,7 @@
           <li><code>python phase2_coordinate_mapping.py --validate --compare-models</code></li>
           <li><code>python phase3_attention_heatmap.py --background camera</code></li>
           <li><code>python web_app.py</code> → <code>http://127.0.0.1:5000</code></li>
-          <li><code>python -m unittest discover -p "test_*.py"</code> (68 tests)</li>
+          <li><code>python -m unittest discover -p "test_*.py"</code> (73 tests)</li>
         </ul>
       </div>
       <div class="card">
@@ -558,6 +558,28 @@
         </ul>
         <p class="ref">AttentionHeatmap — cell, decay_tau, gaussian_sigma_px, gamma, alpha all configurable</p>
       </div>
+      <div class="card">
+        <h4>Accumulation matrix window</h4>
+        <ul>
+          <li>The companion OpenCV window (<code>accumulation matrix</code>, <code>[v]</code> toggles
+              raw vs blurred) is drawn in <b>screen coordinates</b>: 0…1920 / 0…1080 axis labels,
+              quarter gridlines, and a white crosshair + cell box for the live gaze sample with
+              <code>cell=(col, row)</code> and <code>value=</code> in the header.</li>
+          <li><b>Stable scale:</b> values use <code>log1p(v) / log1p(ref)</code> where
+              <code>ref</code> is the session's running maximum of the raw grid (cleared by
+              <code>[r]</code>), then the same <code>pow(n, γ=0.75)</code> + TURBO chain as the
+              render — nothing re-stretches to each frame's peak.</li>
+          <li>So weak cells stay visible (a cell 100× below the peak still reads ≈ 45 % instead of
+              ≈ 1 %), growth and decay are readable over time, and the raw/blur toggle shares one
+              denominator — a blur cannot raise the peak, so the blurred view never clips.</li>
+          <li>The header prints mode, peak, reference, cell/grid/screen geometry, σ in px and
+              cells, hits, rejected samples and accumulated weight.</li>
+          <li>With <code>--background camera</code> the main window shows this screen-space density
+              over the video as context; an on-screen note points to
+              <code>--background canvas</code> when you want both windows in the same frame.</li>
+        </ul>
+        <p class="ref">phase3_attention_heatmap.py → draw_matrix() / main()</p>
+      </div>
     </div>
 
     <div class="diagram">
@@ -619,9 +641,9 @@
           <tr><th>Key</th><th>Action</th></tr>
           <tr><td><code>p</code></td><td>Pause / resume accumulation</td></tr>
           <tr><td><code>d</code></td><td>Toggle time-based decay (τ on/off)</td></tr>
-          <tr><td><code>r</code></td><td>Clear matrix, point log and fixation events</td></tr>
+          <tr><td><code>r</code></td><td>Clear matrix, point log, fixation events and the matrix view's session reference</td></tr>
           <tr><td><code>s</code></td><td>Save points + grid + fixation_events.json</td></tr>
-          <tr><td><code>v</code></td><td>Toggle raw matrix vs blurred view</td></tr>
+          <tr><td><code>v</code></td><td>Toggle raw matrix vs blurred view (both share one scale)</td></tr>
           <tr><td><code>c</code> / <code>SPACE</code></td><td>Calibration (same state machine as Phase 2)</td></tr>
           <tr><td><code>n</code></td><td>Re-centre gaze baseline</td></tr>
         </table>
@@ -1115,8 +1137,9 @@ move the mouse over the canvas →</div>
       <div class="card">
         <h4>What has been verified here</h4>
         <ul>
-          <li>68 offline tests pass — 52 pipeline tests (head pose recovery, fusion, calibration,
+          <li>73 offline tests pass — 57 pipeline tests (head pose recovery, fusion, calibration,
               all three mapping models, fixation detection, time-based decay, σ unit conversion,
+              the accumulation-matrix view's stable scale and screen axes,
               reports, and a synthetic end-to-end Phase 1 run) plus 16 browser-interface tests
               (session/frame/finish/reset contracts, the real MediaPipe frame path on face-less
               frames, calibration fit + residual, grid refit with measured pre/post error, and the

@@ -68,12 +68,12 @@ Pupil position alone is never treated as the direct gaze direction.
 | `gaze_core.py` | 2054 | Shared core: `GazeConfig`, feature definitions, confidence model, head pose, eye fusion, calibration, mapping models, heatmap |
 | `phase1_eye_tracking.py` | 210 | Phase 1 — eye ROI, pupil/iris detection, head pose, feature vector, eye fusion (live webcam UI) |
 | `phase2_coordinate_mapping.py` | 890 | Phase 2 — calibration, mapping models, outlier rejection, EMA, validation mode, evaluation reports |
-| `phase3_attention_heatmap.py` | 713 | Phase 3 — fixation/saccade detection, weighted accumulation, time decay, blur, rendering, export |
-| `test_gaze_pipeline.py` | 829 | Offline pipeline test suite (52 tests, no webcam required) |
-| `test_webapp.py` | 233 | Headless browser-interface test suite (9 tests, no webcam required) |
-| `web_app.py` | 531 | Flask server: live browser sessions, calibration, frame loop, heatmap report |
-| `web_interface.html` | 688 | Browser UI: document upload, webcam capture, calibration, live gaze dot, report |
-| `process_explainer.html` | 1153 | Browser documentation + interactive conceptual simulation |
+| `phase3_attention_heatmap.py` | 869 | Phase 3 — fixation/saccade detection, weighted accumulation, time decay, blur, rendering, export |
+| `test_gaze_pipeline.py` | 952 | Offline pipeline test suite (57 tests, no webcam required) |
+| `test_webapp.py` | 376 | Headless browser-interface test suite (16 tests, no webcam required) |
+| `web_app.py` | 675 | Flask server: live browser sessions, calibration, frame loop, heatmap report |
+| `web_interface.html` | 971 | Browser UI: document upload, webcam capture, calibration, live gaze dot, report |
+| `process_explainer.html` | 1341 | Browser documentation + interactive conceptual simulation |
 
 Three-phase organization is preserved: **Phase 1** eye/head-pose feature extraction,
 **Phase 2** coordinate mapping, **Phase 3** gaze-density heatmap.
@@ -242,6 +242,16 @@ cells (`sigma_cells = sigma / cell_size`); this is documented on the class and s
 the Phase 3 HUD. Decay is `exp(-Δt/τ)`, never a per-frame constant, so behaviour is
 consistent at different frame rates.
 
+**Accumulation-matrix window:** `[v]` switches the companion OpenCV window between the
+raw grid and the blurred one. Both are drawn in screen coordinates — 0…1920 / 0…1080
+axis labels, quarter gridlines, a white crosshair with `cell=(col, row)` and `value=`
+for the live gaze cell — and scaled with `log1p` against the session's running maximum of
+the raw grid instead of each frame's peak, followed by the same gamma + TURBO chain as
+the rendered heatmap. Weak cells stay visible, growth and decay stay readable, and the
+raw/blur toggle shares one denominator (a Gaussian blur cannot raise the peak, so the
+blurred view never clips). The header reports the peak, the reference, σ in px and
+cells, grid shape, hits, rejects and accumulated weight.
+
 **Terminology:** the baseline output is a **gaze-density heatmap**. It can be described
 as a visual-attention estimation component only because fixation duration and
 confidence are folded into the weights.
@@ -365,7 +375,7 @@ python phase2_coordinate_mapping.py --screen 1920x1080          # calibration + 
 python phase2_coordinate_mapping.py --validate --compare-models # validation report
 python phase3_attention_heatmap.py --background camera          # gaze-density heatmap
 python web_app.py                                               # live browser demo (webcam)
-python -m unittest discover -p "test_*.py"                      # offline test suite (61 tests)
+python -m unittest discover -p "test_*.py"                      # offline test suite (73 tests)
 ```
 
 ### Live browser demo (webcam required)
@@ -408,7 +418,7 @@ Phase 2: `c` calibrate, `SPACE` capture point, `v` validation, `m` mapping model
 
 Run with `python -m unittest discover -p "test_*.py"` (offline, deterministic):
 
-- **61 tests pass** (52 pipeline + 9 web interface), `pyflakes` is clean on all Python files.
+- **73 tests pass** (57 pipeline + 16 web interface), `pyflakes` is clean on all Python files.
 - Covered: configuration validation, feature-vector construction, head-pose recovery of
   known yaw/pitch/roll from projected landmarks, landmark/head-pose confidence
   behaviour, confidence breakdown, confidence-weighted fusion and its rejection path,

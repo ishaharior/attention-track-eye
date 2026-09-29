@@ -470,18 +470,159 @@ def draw_hud(
     )
 
 
-def draw_matrix(heat: AttentionHeatmap, show_blur: bool) -> np.ndarray:
+MATRIX_LEFT = 70  # panel margins around the upscaled grid (pixels)
+MATRIX_TOP = 84
+MATRIX_RIGHT = 18
+MATRIX_BOTTOM = 30
+
+_COLORMAP_NAMES = {
+    cv2.COLORMAP_TURBO: "TURBO",
+    cv2.COLORMAP_JET: "JET",
+    cv2.COLORMAP_BONE: "BONE",
+    cv2.COLORMAP_VIRIDIS: "VIRIDIS",
+    cv2.COLORMAP_INFERNO: "INFERNO",
+    cv2.COLORMAP_MAGMA: "MAGMA",
+    cv2.COLORMAP_PLASMA: "PLASMA",
+    cv2.COLORMAP_HOT: "HOT",
+    cv2.COLORMAP_COOL: "COOL",
+}
+
+def _put_text_fitted(
+    image: np.ndarray,
+    text: str,
+    origin: Tuple[int, int],
+    scale: float,
+    color: Tuple[int, int, int],
+    thickness: int = 1,
+) -> None:
+    """putText that shrinks the font until the line fits inside the image."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    while scale > 0.3:
+        (width, _), _ = cv2.getTextSize(text, font, scale, thickness)
+        if origin[0] + width <= image.shape[1] - 6:
+            break
+        scale -= 0.05
+    cv2.putText(image, text, origin, font, scale, color, thickness, cv2.LINE_AA)
+
+
+def draw_matrix(
+    heat: AttentionHeatmap,
+    show_blur: bool,
+    position: Optional[Tuple[float, float]] = None,
+    reference: float = 0.0,
+) -> np.ndarray:
+    """Draw the accumulation matrix in screen coordinates with a stable scale.
+
+    The view is a diagnostic, so it must answer two questions the old
+    per-frame-normalised version could not:
+
+    - *how much is actually accumulated?*  Values are scaled with `log1p`
+      against `reference` -- the running maximum of the raw grid for this
+      session, maintained by `main` -- then gamma-corrected and colourised with
+      the same colormap as `AttentionHeatmap.render`.  Nothing rescales to each
+      frame's peak, so weak structure stays visible, growth and decay stay
+      readable, and the raw/blur toggle compares both views against one
+      denominator (the blurred peak can never exceed the raw peak, so the blur
+      view never clips).  The header prints the absolute peak and reference.
+    - *where on the screen is this cell?*  Screen-pixel axes, quarter
+      gridlines and a live gaze crosshair + cell readout put the matrix in the
+      same coordinate frame as the main window.
+    """
+    grid_h, grid_w = heat.grid.shape
     data = heat.blurred() if show_blur else heat.grid
-    peak = float(data.max())
+    peak = float(data.max()) if data.size else 0.0
+    ref = max(float(reference), peak, 1e-6)
     if peak <= 1e-6:
-        normalized = np.zeros_like(data, dtype=np.uint8)
+        norm = np.zeros_like(data, dtype=np.float32)
     else:
-        normalized = np.clip(data / peak, 0.0, 1.0)
-        normalized = (normalized * 255.0).astype(np.uint8)
-    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_BONE)
-    label = "GaussianBlur(grid)" if show_blur else "raw NumPy accumulation matrix"
-    cv2.putText(colored, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
-    return colored
+        norm = np.log1p(data)
+        norm *= 1.0 / math.log1p(ref)
+        np.power(norm, heat.gamma, out=norm)
+        np.clip(norm, 0.0, 1.0, out=norm)
+    colored = cv2.applyColorMap((norm * 255.0).astype(np.uint8), heat.colormap)
+
+    scale = max(1, min(3, 1000 // max(grid_w, 1)))
+    view = cv2.resize(colored, (grid_w * scale, grid_h * scale), interpolation=cv2.INTER_NEAREST)
+
+    # scalar fill: broadcasting a per-channel tuple into a 2 MB buffer is ~5x slower
+    panel = np.full(
+        (view.shape[0] + MATRIX_TOP + MATRIX_BOTTOM, view.shape[1] + MATRIX_LEFT + MATRIX_RIGHT, 3),
+        11,
+        dtype=np.uint8,
+    )
+    x0, y0 = MATRIX_LEFT, MATRIX_TOP
+    panel[y0:y0 + view.shape[0], x0:x0 + view.shape[1]] = view
+
+    # quarter gridlines + screen-pixel tick labels (same frame as the main window)
+    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+        vx = x0 + int(round(fraction * (view.shape[1] - 1)))
+        vy = y0 + int(round(fraction * (view.shape[0] - 1)))
+        if 0.0 < fraction < 1.0:
+            cv2.line(panel, (vx, y0), (vx, y0 + view.shape[0]), (70, 76, 84), 1, cv2.LINE_AA)
+            cv2.line(panel, (x0, vy), (x0 + view.shape[1], vy), (70, 76, 84), 1, cv2.LINE_AA)
+        cv2.line(panel, (vx, y0 - 6), (vx, y0), (150, 160, 170), 1, cv2.LINE_AA)
+        cv2.line(panel, (vx, y0 + view.shape[0]), (vx, y0 + view.shape[0] + 6), (150, 160, 170), 1, cv2.LINE_AA)
+        x_text = f"{int(round(fraction * heat.width))}"
+        (tw, th), _ = cv2.getTextSize(x_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.putText(
+            panel, x_text, (vx - tw // 2, y0 + view.shape[0] + 22),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 180, 190), 1, cv2.LINE_AA,
+        )
+        y_text = f"{int(round(fraction * heat.height))}"
+        (tw, th), _ = cv2.getTextSize(y_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.line(panel, (x0 - 6, vy), (x0, vy), (150, 160, 170), 1, cv2.LINE_AA)
+        cv2.putText(
+            panel, y_text, (x0 - 8 - tw, vy + th // 2),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (170, 180, 190), 1, cv2.LINE_AA,
+        )
+    cv2.rectangle(panel, (x0 - 1, y0 - 1), (x0 + view.shape[1], y0 + view.shape[0]), (130, 140, 150), 1, cv2.LINE_AA)
+
+    # live gaze crosshair and the value of the cell it lands in
+    if position is None:
+        gaze_text = "gaze: no valid sample (nothing maps to a cell)"
+        gaze_color = (120, 130, 140)
+    else:
+        col = min(max(int(position[0] / heat.cell), 0), grid_w - 1)
+        row = min(max(int(position[1] / heat.cell), 0), grid_h - 1)
+        vx = x0 + col * scale + scale // 2
+        vy = y0 + row * scale + scale // 2
+        cv2.line(panel, (x0, vy), (x0 + view.shape[1], vy), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(panel, (vx, y0), (vx, y0 + view.shape[0]), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.rectangle(
+            panel,
+            (x0 + col * scale, y0 + row * scale),
+            (x0 + (col + 1) * scale - 1, y0 + (row + 1) * scale - 1),
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        gaze_text = (
+            f"gaze X={position[0]:7.1f} Y={position[1]:7.1f}  "
+            f"cell=(col {col}, row {row})  value={float(data[row, col]):.3f}"
+        )
+        gaze_color = (230, 230, 230)
+
+    mode = "GaussianBlur(grid)" if show_blur else "raw accumulation matrix"
+    colormap = _COLORMAP_NAMES.get(heat.colormap, f"id={heat.colormap}")
+    _put_text_fitted(
+        panel,
+        f"{mode}  peak={peak:.3f}  ref={ref:.3f} (session max of raw grid)  "
+        f"log1p+gamma={heat.gamma:.2f}  {colormap}",
+        (x0, 22),
+        0.55,
+        (0, 229, 255),
+    )
+    _put_text_fitted(
+        panel,
+        f"cell={heat.cell}px  grid={grid_w}x{grid_h} (cols x rows)  screen={heat.width}x{heat.height}  "
+        f"origin=top-left  sigma={heat.sigma:.0f}px({heat.sigma_cells:.1f} cells)  "
+        f"hits={heat.total_hits}  rejected={heat.rejected_low_confidence}  weight={heat.total_weight:.1f}",
+        (x0, 46),
+        0.5,
+        (170, 210, 255),
+    )
+    _put_text_fitted(panel, gaze_text, (x0, 70), 0.5, gaze_color)
+    return panel
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +689,7 @@ def main() -> int:
     show_blur = True
     position = None
     decay_on = heat.decay_enabled
+    matrix_scale = 0.0  # running session reference for the matrix view
     previous_time: Optional[float] = None
     samples_attempted = 0
 
@@ -619,6 +761,10 @@ def main() -> int:
             if not heat.paused and decay_on:
                 heat.decay_step(dt_seconds)
 
+            # running reference: the matrix view scales against the largest raw
+            # value seen this session instead of re-normalising to each frame's peak
+            matrix_scale = max(matrix_scale, float(heat.grid.max()))
+
             background = canvas_background if args.background == "canvas" else frame
             composite = heat.render(background)
             fps = 0.9 * fps + 0.1 * (1.0 / max(time.perf_counter() - loop_start, 1e-6))
@@ -643,6 +789,18 @@ def main() -> int:
                     (255, 255, 255), 1,
                 )
 
+            if args.background == "camera":
+                # screen-space density over the video is a coordinate mismatch unless
+                # it is called out; drawn after the inset so it is never occluded
+                _put_text_fitted(
+                    composite,
+                    f"density is in SCREEN px ({screen_w}x{screen_h}) - video is context only; "
+                    "use --background canvas to match the matrix window",
+                    (14, 128),
+                    0.5,
+                    (120, 210, 255),
+                )
+
             preview_scale = args.preview / max(composite.shape[1], 1)
             preview = cv2.resize(
                 composite,
@@ -650,7 +808,7 @@ def main() -> int:
                 interpolation=cv2.INTER_AREA,
             )
             cv2.imshow("attention-track phase 3 - gaze-density heatmap", preview)
-            cv2.imshow("accumulation matrix", draw_matrix(heat, show_blur))
+            cv2.imshow("accumulation matrix", draw_matrix(heat, show_blur, position, matrix_scale))
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
@@ -664,6 +822,7 @@ def main() -> int:
             elif key == ord("r"):
                 heat.reset()
                 detector.reset()
+                matrix_scale = 0.0
                 status = "matrix cleared"
             elif key == ord("s"):
                 summary = detector.summary(samples_attempted)
