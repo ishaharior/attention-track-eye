@@ -32,7 +32,7 @@
   /* ---------- pipeline ---------- */
   .pipeline{display:flex;gap:0;align-items:stretch;justify-content:center;flex-wrap:wrap;margin:10px 0 40px}
   .stage{
-    flex:1;min-width:210px;background:var(--panel);border:1px solid var(--line);
+    flex:1;min-width:175px;background:var(--panel);border:1px solid var(--line);
     border-radius:14px;padding:18px 16px;position:relative;transition:.2s;cursor:pointer;
   }
   .stage:hover{border-color:var(--accent);transform:translateY(-3px)}
@@ -157,9 +157,10 @@
   <h1>attention-track-<span>eye</span> — Work Process</h1>
   <p>A 3-phase webcam <b>gaze-estimation</b> pipeline: MediaPipe face mesh → eye + head-pose
      feature extraction → calibrated feature→screen mapping → fixation-aware
-     <b>gaze-density heatmap</b>. Pupil/iris and facial features are inputs to a calibrated
+     <b>gaze-density heatmap</b>. Three CLI phases plus a Flask browser demo that runs the same
+     pipeline live. Pupil/iris and facial features are inputs to a calibrated
      model — pupil position alone is never treated as the direct gaze direction.</p>
-  <div class="badge">gaze_core.py + phase1 / phase2 / phase3</div>
+  <div class="badge">gaze_core.py + phase1 / phase2 / phase3 + web_app.py</div>
 </header>
 
 <main>
@@ -169,13 +170,15 @@
     <h2>1 · System overview <span class="tag">architecture</span></h2>
     <p class="sub">Webcam frames flow through three phases. Each phase is a separate script;
     <code>gaze_core.py</code> holds the shared configuration, feature definitions, confidence
-    model, mapping models and heatmap used by all of them.</p>
+    model, mapping models and heatmap used by all of them — including the browser demo
+    (<code>web_app.py</code>), which is an extra entry point, not a fourth phase.</p>
 
     <div class="pipeline">
       <div class="stage" onclick="go('phase1')">
         <span class="num">INPUT</span>
         <h3>Webcam Frame</h3>
-        <p><code>cv2.VideoCapture</code> grabs 1280×720 frames, mirrored horizontally by default.</p>
+        <p><code>cv2.VideoCapture</code> grabs 1280×720 frames, mirrored by default — the browser
+           demo posts JPEG data-URLs instead.</p>
       </div>
       <div class="arrow">→</div>
       <div class="stage" onclick="go('phase1')">
@@ -198,6 +201,14 @@
         <p>I-DT/I-VT fixation detection → confidence- &amp; fixation-weighted accumulation →
            <code>exp(−Δt/τ)</code> decay → Gaussian blur → TURBO render.</p>
       </div>
+      <div class="arrow">→</div>
+      <div class="stage" onclick="go('webapp')">
+        <span class="num">LIVE</span>
+        <h3>Browser Demo</h3>
+        <p>Upload a document → calibrate → live gaze dot → optional grid refit →
+           heatmap report over the document. Same three phases, run by
+           <code>web_app.py</code>.</p>
+      </div>
     </div>
 
     <div class="grid">
@@ -211,18 +222,24 @@
               evaluation reports.</li>
           <li><code>phase3_attention_heatmap.py</code> (713) — fixation detection, accumulation,
               decay, rendering, export.</li>
-          <li><code>test_gaze_pipeline.py</code> (829) — 52 offline tests, no webcam needed.</li>
+          <li><code>web_app.py</code> (675) — Flask server: sessions, frame loop, calibration,
+              grid refit, heatmap report.</li>
+          <li><code>web_interface.html</code> (971) — browser UI: upload, webcam, calibration,
+              live gaze dot, grid overlay, report.</li>
+          <li><code>test_gaze_pipeline.py</code> (829) — 52 offline pipeline tests, no webcam.</li>
+          <li><code>test_webapp.py</code> (376) — 16 headless browser-interface tests, no webcam.</li>
         </ul>
       </div>
       <div class="card">
         <h4>Run commands</h4>
         <ul>
-          <li><code>pip install -r requirements.txt</code> (mediapipe, opencv, numpy)</li>
+          <li><code>pip install -r requirements.txt</code> (mediapipe, opencv, numpy, flask)</li>
           <li><code>python phase1_eye_tracking.py</code></li>
           <li><code>python phase2_coordinate_mapping.py --screen 1920x1080</code></li>
           <li><code>python phase2_coordinate_mapping.py --validate --compare-models</code></li>
           <li><code>python phase3_attention_heatmap.py --background camera</code></li>
-          <li><code>python -m unittest -v test_gaze_pipeline</code></li>
+          <li><code>python web_app.py</code> → <code>http://127.0.0.1:5000</code></li>
+          <li><code>python -m unittest discover -p "test_*.py"</code> (68 tests)</li>
         </ul>
       </div>
       <div class="card">
@@ -613,9 +630,139 @@
     </details>
   </section>
 
-  <!-- ============ 5. CONFIDENCE MODEL ============ -->
+  <!-- ============ 5. LIVE BROWSER DEMO ============ -->
+  <section id="webapp">
+    <h2>5 · Live browser demo <span class="tag">web_app.py + web_interface.html</span></h2>
+    <p class="sub">The three phases, driven from a browser instead of an OpenCV window: upload a
+    document, calibrate, watch the live gaze dot, optionally refit the mapping with a digit grid,
+    then build a heatmap report on the document. Runs on <code>127.0.0.1</code> — frames travel
+    only from your browser to the local Flask server.</p>
+
+    <div class="flow">
+      <span class="chip"><b>browser</b> getUserMedia → JPEG dataURL</span>
+      <span class="chip">→</span>
+      <span class="chip"><b>EyeTracker.process</b> Phase 1</span>
+      <span class="chip">→</span>
+      <span class="chip"><b>ScreenCalibrator.update</b> (optional)</span>
+      <span class="chip">→</span>
+      <span class="chip"><b>ScreenMapper.map</b> Phase 2</span>
+      <span class="chip">→</span>
+      <span class="chip"><b>AttentionHeatmap.add</b> Phase 3</span>
+      <span class="chip">→</span>
+      <span class="chip"><b>/api/finish</b> render report</span>
+    </div>
+
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <h4>Session flow</h4>
+        <ul>
+          <li><b>Upload</b> — PNG/JPG directly; PDF through PDF.js (CDN), all pages stacked into one
+              image. Uploads longer than 2400 px are downscaled; the request body is capped at 64 MB.</li>
+          <li><b>Options</b> — calibration 5 points / 9 points / none (rough centre mapping),
+              mapping model affine | polynomial | mlp, and the time-decay checkbox.</li>
+          <li><b>Track</b> — the client posts a frame every 80 ms (≈12.5 fps) while the sidebar
+              shows confidence, face rate, fps, inference time and the calibration residual.</li>
+          <li><b>Finish</b> — <code>/api/finish</code> renders the report; <code>gaze_heatmap.png</code>
+              and <code>gaze_report.json</code> are downloadable.</li>
+        </ul>
+        <p class="ref">TrackingSession · handle_frame() · build_report()</p>
+      </div>
+      <div class="card">
+        <h4>Two coordinate systems</h4>
+        <ul>
+          <li>The calibrator and mapper work in <b>display pixels</b> — the CSS rectangle the
+              document occupies in the viewport.</li>
+          <li>The heatmap accumulates in <b>document natural pixels</b> (rescaled by
+              <code>doc_size / rect_size</code>), so the report matches the uploaded file's own scale.</li>
+          <li>σ follows the same rule: <code>σ_doc = clamp(45 × doc_w / 1920, 10, 150)</code>.</li>
+          <li>Calibration is per session (a temp <code>session_calibration.npz</code>), so a run
+              never overwrites the CLI's <code>calibration.npz</code>.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>What differs from the CLI phases</h4>
+        <ul>
+          <li><b>Decay is end-anchored.</b> Nothing decays per frame; when the checkbox is on,
+              <code>/api/finish</code> weights every stored point by
+              <code>exp(−(t_end − t)/τ)</code> once, so old gaze does not vanish from a long report.
+              With it off the report shows the full session.</li>
+          <li><b>Accumulation is per accepted frame</b> — each accepted frame adds
+              <code>confidence</code> to the grid (Phase 3 instead multiplies by
+              <code>Δt × 10/s</code> and an I-DT fixation weight). Fixation detection still runs, so
+              fixations and saccades land in the report.</li>
+          <li>Low-confidence frames are still dropped by the same
+              <code>heatmap_min_confidence</code> (0.35) gate and counted as
+              <code>rejected_low_confidence</code>.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <h4>Grid mapping (optional refit)</h4>
+        <ul>
+          <li><b>Show grid</b> overlays a 6×6 grid; every 5 s a shuffled coloured digit (0–9)
+              appears in a different cell — look at each digit, head still.</li>
+          <li>Frames during a digit are collected next to that digit's position only when the face
+              is found and confidence ≥ <code>calibration_min_confidence</code> (max 60 samples
+              per digit).</li>
+          <li><b>Stop grid — fit mapping</b> takes the MAD-<code>robust_median</code> feature vector
+              per digit (≥3 samples, ≥3 usable digits), merges them with the existing calibration
+              samples and refits.</li>
+          <li>The measured mean error <b>before and after</b> the refit is reported — an improvement
+              is shown, not claimed. A fit that fails says so instead of silently keeping the old model.</li>
+        </ul>
+        <p class="ref">/api/grid/finish · GRID_INTERVAL_S = 5 · GRID_MIN_TARGETS = 3</p>
+      </div>
+      <div class="card">
+        <h4>Report contents</h4>
+        <ul>
+          <li>Session: duration, frames, face rate, mean confidence, gaze samples, heatmap points,
+              rejected-low-confidence count, mean inference time.</li>
+          <li>Behaviour: fixation count, saccade count, mean fixation duration.</li>
+          <li>Mapping: model, valid sample rate, per-reason rejection counts; calibration residual
+              (mean / median / max) when calibrated; grid pre/post error when used.</li>
+          <li>Heatmap: cell size, σ, γ, α, τ used, <code>TURBO (blue → red)</code> — blue = low
+              density, red = high.</li>
+        </ul>
+        <p class="ref">stats dict in build_report() → gaze_report.json</p>
+      </div>
+      <div class="card">
+        <h4>HTTP API</h4>
+        <ul>
+          <li><code>GET /</code> — serves <code>web_interface.html</code>.</li>
+          <li><code>POST /api/session</code> — document image + rect + points/model/calibration.</li>
+          <li><code>POST /api/frame</code> — one JPEG frame (+ optional grid payload) → gaze,
+              confidence, head pose, mapper stats.</li>
+          <li><code>POST /api/grid/finish</code> — refit from digit samples (tracking mode only).</li>
+          <li><code>POST /api/finish</code> — report; <code>POST /api/reset</code> — new run;
+              <code>GET /api/health</code>.</li>
+        </ul>
+        <p class="ref">400 bad payload · 409 no session / not finished / already finished ·
+           500 single-frame or report failure (the frame loop survives it)</p>
+      </div>
+    </div>
+
+    <details>
+      <summary>What the browser demo does and does not prove</summary>
+      <div class="body">
+        <p>Unlike the JavaScript simulation in section 12, this demo runs the <b>real</b>
+        <code>EyeTracker</code>, <code>ScreenCalibrator</code>/<code>ScreenMapper</code>,
+        <code>AttentionHeatmap</code> and <code>EventDetector</code> — no re-implementation. It is
+        a genuine test of the implemented pipeline on your machine and your camera.</p>
+        <p>It still inherits every limitation in section 11: the accuracy you see is whatever your
+        setup measures, and the report's residual / error numbers are the only basis for a claim.
+        Webcam capture itself was never exercised in the development environment (no camera was
+        available), so live sessions must be checked by you.</p>
+        <p>Everything is local: <code>--host</code> / <code>--port</code> change the bind, and no
+        frame is sent anywhere but <code>127.0.0.1</code>.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ 6. CONFIDENCE MODEL ============ -->
   <section id="confidence">
-    <h2>5 · Confidence model <span class="tag">5 separate components</span></h2>
+    <h2>6 · Confidence model <span class="tag">5 separate components</span></h2>
     <p class="sub">There is no single generic confidence number. Five interpretable components are
     computed separately and combined with explicit, configurable weights.</p>
 
@@ -624,7 +771,8 @@
       <tr>
         <td><code>pupil</code></td>
         <td>Reliability of pupil/iris localization</td>
-        <td>Quality-weighted pupil detection confidence of the visible eyes</td>
+        <td>Quality-weighted mean of the per-eye quality scores (each quality carries the
+            pupil-detection confidence at 0.35 weight)</td>
         <td>0.30</td>
       </tr>
       <tr>
@@ -658,8 +806,9 @@
         <h4>Combination</h4>
         <p><code>combined = Σ(component × weight) / Σ(weights)</code> — weights live in
         <code>GazeConfig.confidence_weights</code>. The full breakdown
-        (<code>pup / lm / hp / gz / tmp</code>) is printed in every HUD, so a low score can always be
-        traced to a cause instead of guessed at.</p>
+        (<code>pup / lm / hp / gz / tmp</code>) is printed in the Phase 1 and Phase 2 HUDs, and the
+        web API returns it as <code>confidence_breakdown</code>, so a low score can always be
+        traced to a cause instead of guessed at (Phase 3's HUD shows only the combined value).</p>
       </div>
       <div class="card">
         <h4>Where confidence is enforced</h4>
@@ -673,9 +822,9 @@
     </div>
   </section>
 
-  <!-- ============ 6. CALIBRATION PROCEDURE ============ -->
+  <!-- ============ 7. CALIBRATION PROCEDURE ============ -->
   <section id="calibration">
-    <h2>6 · Calibration procedure <span class="tag">5 / 9 / 13 points</span></h2>
+    <h2>7 · Calibration procedure <span class="tag">5 / 9 / 13 points</span></h2>
     <p class="sub">Calibration collects <code>Features → Known Screen Coordinate</code> pairs — not a
     single frame per point. The 5-point layout stays available as a lightweight mode.</p>
 
@@ -719,13 +868,15 @@
 
     <p class="sub" style="margin-top:14px"><code>SPACE</code> performs a manual capture of the current
     target using whatever has been collected; <code>[r]</code> resets everything. A fit is refused if
-    there are fewer than 4 samples or if the feature spread is below
-    <code>min_calibration_span</code> (0.25) — degenerate data cannot produce a mapping.</p>
+    there are fewer than 4 samples, or if fewer than two feature channels reach
+    <code>min_calibration_span</code> (0.25) of spread — degenerate data cannot produce a mapping.
+    The browser demo runs this same calibrator against the document rectangle (section 5), and the
+    digit-grid refit reuses the same fit rules.</p>
   </section>
 
-  <!-- ============ 7. VALIDATION METHODOLOGY ============ -->
+  <!-- ============ 8. VALIDATION METHODOLOGY ============ -->
   <section id="validation">
-    <h2>7 · Validation methodology <span class="tag">screen-space error</span></h2>
+    <h2>8 · Validation methodology <span class="tag">screen-space error</span></h2>
     <p class="sub">Guided validation against known screen targets. The pipeline's accuracy is whatever
     this mode measures on your setup — nothing in the codebase asserts otherwise.</p>
 
@@ -771,9 +922,9 @@
     </div>
   </section>
 
-  <!-- ============ 8. EVALUATION METRICS ============ -->
+  <!-- ============ 9. EVALUATION METRICS ============ -->
   <section id="metrics">
-    <h2>8 · Evaluation metrics <span class="tag">JSON + CSV report</span></h2>
+    <h2>9 · Evaluation metrics <span class="tag">JSON + CSV report</span></h2>
     <p class="sub">The structured evaluation report written by Phase 2
     (<code>--report-prefix</code>, default <code>evaluation_report</code>).</p>
 
@@ -787,7 +938,7 @@
           <td>Screen-space error statistics in pixels</td></tr>
       <tr><td><code>valid_sample_rate</code></td><td>Accepted ÷ attempted samples (rejections are visible, not hidden)</td></tr>
       <tr><td><code>average_confidence</code></td><td>Mean combined confidence of recorded samples</td></tr>
-      <tr><td><code>recorded_samples</code> · <code>attempts</code></td><td>Sample counts behind the statistics</td></tr>
+      <tr><td><code>recorded_samples</code></td><td>Predictions actually recorded behind the statistics</td></tr>
       <tr><td><code>per_target_error_px</code></td><td>Error statistics broken down per calibration target</td></tr>
       <tr><td><code>error_by_head_pose_px</code></td><td>Error statistics per head-pose condition</td></tr>
       <tr><td><code>angular_error_degrees</code></td><td>Only present when display/camera geometry was supplied</td></tr>
@@ -797,12 +948,13 @@
 
     <p class="sub" style="margin-top:14px">Phase 3 adds the optional behavioural metrics to
     <code>fixation_events.json</code>: fixation detection rate, average / median fixation duration,
-    and saccade count.</p>
+    and saccade count. The browser demo writes a different, session-oriented stats object
+    (<code>gaze_report.json</code>, section 5) rather than this validation report.</p>
   </section>
 
-  <!-- ============ 9. CONFIGURATION ============ -->
+  <!-- ============ 10. CONFIGURATION ============ -->
   <section id="config">
-    <h2>9 · Configuration parameters <span class="tag">GazeConfig</span></h2>
+    <h2>10 · Configuration parameters <span class="tag">GazeConfig</span></h2>
     <p class="sub">Everything lives in one dataclass in <code>gaze_core.py</code>; CLI flags mirror
     these (<code>--help</code> on any phase). Defaults are the values the original implementation used
     where they existed.</p>
@@ -811,10 +963,11 @@
       <tr><th>Group</th><th>Parameter</th><th>Default</th><th>Meaning</th></tr>
       <tr><td rowspan="2">Display</td><td><code>screen_width</code>, <code>screen_height</code></td><td>1920, 1080</td><td>Virtual screen size</td></tr>
       <tr><td><code>mapping_model</code></td><td>affine</td><td>affine | polynomial | mlp</td></tr>
-      <tr><td rowspan="4">Calibration</td><td><code>calibration_points</code></td><td>9</td><td>5 / 9 / 13 target layout</td></tr>
+      <tr><td rowspan="5">Calibration</td><td><code>calibration_points</code></td><td>9</td><td>5 / 9 / 13 target layout</td></tr>
       <tr><td><code>calibration_samples_per_point</code></td><td>20</td><td>Accepted frames per target</td></tr>
       <tr><td><code>calibration_stabilize_frames</code></td><td>12</td><td>Dwell before sampling</td></tr>
       <tr><td><code>calibration_min_confidence</code> / <code>calibration_outlier_z</code></td><td>0.35 / 3.0</td><td>Confidence gate / MAD outlier z-score</td></tr>
+      <tr><td><code>min_calibration_span</code></td><td>0.25</td><td>Minimum feature spread required for a fit</td></tr>
       <tr><td rowspan="3">Smoothing &amp; outliers</td><td><code>ema_alpha</code></td><td>0.3</td><td>EMA factor (1 = off)</td></tr>
       <tr><td><code>confidence_threshold</code></td><td>0.5</td><td>Sample rejection gate</td></tr>
       <tr><td><code>outlier_max_jump_px</code> / <code>outlier_max_speed_px_s</code></td><td>0.0 (auto) / 0.0</td><td>1.5 × diagonal by default / speed limit disabled</td></tr>
@@ -835,9 +988,9 @@
     </table>
   </section>
 
-  <!-- ============ 10. LIMITATIONS ============ -->
+  <!-- ============ 11. LIMITATIONS ============ -->
   <section id="limitations">
-    <h2>10 · Limitations <span class="tag">read this before trusting a number</span></h2>
+    <h2>11 · Limitations <span class="tag">read this before trusting a number</span></h2>
     <p class="sub">The pipeline's accuracy depends on conditions the algorithm does not control.
     Research-grade accuracy must never be claimed without measured validation on the target setup.</p>
 
@@ -864,12 +1017,15 @@
       produces an inaccurate mapping regardless of the model chosen.</p></div>
       <div class="card"><h4>Individual variation</h4><p>All thresholds (dispersion, confidence gates,
       quality weights) are heuristics tuned on generic data and may need re-tuning per person.</p></div>
+      <div class="card"><h4>Browser frame rate</h4><p>The web demo posts ≈12.5 fps JPEG frames, so
+      fixation granularity, temporal confidence and saccade peak velocities are coarser than in the
+      native loops; upload scaling also resizes the heatmap grid.</p></div>
     </div>
   </section>
 
-  <!-- ============ 11. INTERACTIVE DEMONSTRATION ============ -->
+  <!-- ============ 12. INTERACTIVE DEMONSTRATION ============ -->
   <section id="demo">
-    <h2>11 · Interactive demonstration <span class="tag">Interactive Conceptual Simulation</span></h2>
+    <h2>12 · Interactive demonstration <span class="tag">Interactive Conceptual Simulation</span></h2>
     <p class="sub"><b>Phase 2–3 Visualization Demo.</b> A small JavaScript simulation of the mapping
     and heatmap concepts so you can feel the effect of gain, smoothing, calibration and decay.</p>
 
@@ -881,8 +1037,9 @@
         <code>exp(−Δt/τ)</code>, a box blur instead of a true Gaussian, a single-frame 5-point
         calibration instead of the multi-sample 5/9/13-point procedure, and no fixation detection,
         confidence model or outlier rejection. The real pipeline is the Python code in
-        <code>phase1/2/3</code>. <b>Nothing in this demo validates the Python gaze-estimation
-        pipeline.</b>
+        <code>phase1/2/3</code> — and if you want a real browser session with your webcam, use the
+        live demo in section 5 instead of this simulation. <b>Nothing in this demo validates the
+        Python gaze-estimation pipeline.</b>
       </div>
 
       <div class="demo-row">
@@ -912,9 +1069,9 @@ move the mouse over the canvas →</div>
     </div>
   </section>
 
-  <!-- ============ 12. RESEARCH METHODOLOGY NOTES ============ -->
+  <!-- ============ 13. RESEARCH METHODOLOGY NOTES ============ -->
   <section id="methodology">
-    <h2>12 · Research methodology notes <span class="tag">integrity</span></h2>
+    <h2>13 · Research methodology notes <span class="tag">integrity</span></h2>
     <div class="grid">
       <div class="card">
         <h4>How to make an accuracy claim</h4>
@@ -932,6 +1089,8 @@ move the mouse over the canvas →</div>
           <li>Evaluate affine / polynomial / MLP on the <b>same</b> validation features
               (<code>--compare-models</code>).</li>
           <li>Compare raw vs calibrated by running validation twice, not by intuition.</li>
+          <li>The browser grid refit prints its own before/after error on the refitted digits —
+              read it the same way as a validation report.</li>
           <li>A more complex model is never presumed better — measured error decides.</li>
         </ul>
       </div>
@@ -956,12 +1115,18 @@ move the mouse over the canvas →</div>
       <div class="card">
         <h4>What has been verified here</h4>
         <ul>
-          <li>52 offline tests pass (head pose recovery, fusion, calibration, all three mapping
-              models, fixation detection, time-based decay, σ unit conversion, reports, and a
-              synthetic end-to-end Phase 1 run).</li>
-          <li>All three CLIs start and parse arguments; <code>pyflakes</code> is clean.</li>
+          <li>68 offline tests pass — 52 pipeline tests (head pose recovery, fusion, calibration,
+              all three mapping models, fixation detection, time-based decay, σ unit conversion,
+              reports, and a synthetic end-to-end Phase 1 run) plus 16 browser-interface tests
+              (session/frame/finish/reset contracts, the real MediaPipe frame path on face-less
+              frames, calibration fit + residual, grid refit with measured pre/post error, and the
+              report render with its blue→red colormap endpoints).</li>
+          <li>All three CLIs start and parse arguments; <code>web_app.py</code> serves
+              <code>/</code>, <code>/api/health</code> and the expected 4xx codes;
+              <code>pyflakes</code> is clean on every Python file.</li>
           <li><b>Not verified here:</b> live webcam capture, real-face pupil behaviour and live
-              on-screen sessions — no camera was available in the development environment.</li>
+              on-screen or in-browser sessions — no camera was available in the development
+              environment.</li>
         </ul>
       </div>
       <div class="card">
